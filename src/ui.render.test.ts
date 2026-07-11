@@ -43,9 +43,16 @@ interface Assign {
   prop: string;
   value: unknown;
 }
+// A single ordered timeline entry (a method call OR a property assignment) so a
+// test can reconstruct state at the moment of a call — e.g. "which strokeStyle
+// was live when this stroke() ran", used to count the dotted band polylines.
+type SeqEntry =
+  | { kind: "call"; m: string; args: unknown[] }
+  | { kind: "set"; prop: string; value: unknown };
 interface RecordingCtx {
   calls: Call[];
   sets: Assign[];
+  seq: SeqEntry[];
   proxy: CanvasRenderingContext2DLike;
   reset(): void;
 }
@@ -55,6 +62,7 @@ type CanvasRenderingContext2DLike = Record<string, unknown>;
 function makeRecordingCtx(): RecordingCtx {
   const calls: Call[] = [];
   const sets: Assign[] = [];
+  const seq: SeqEntry[] = [];
   const store: Record<string, unknown> = {};
   const handler: ProxyHandler<Record<string, unknown>> = {
     get(_t, prop) {
@@ -65,6 +73,7 @@ function makeRecordingCtx(): RecordingCtx {
       if (Object.prototype.hasOwnProperty.call(store, prop)) return store[prop];
       return (...args: unknown[]): undefined => {
         calls.push({ m: prop, args });
+        seq.push({ kind: "call", m: prop, args });
         return undefined;
       };
     },
@@ -72,6 +81,7 @@ function makeRecordingCtx(): RecordingCtx {
       if (typeof prop === "string") {
         store[prop] = value;
         sets.push({ prop, value });
+        seq.push({ kind: "set", prop, value });
       }
       return true;
     },
@@ -80,12 +90,29 @@ function makeRecordingCtx(): RecordingCtx {
   return {
     calls,
     sets,
+    seq,
     proxy,
     reset() {
       calls.length = 0;
       sets.length = 0;
+      seq.length = 0;
     },
   };
+}
+
+// The four v0.1.1 band-pair colours (cool -> hot = close -> extreme). On the main
+// canvas these appear as strokeStyle ONLY inside drawBands (verified against
+// chart.ts: every other stroke uses a non-band colour), so counting stroke()
+// calls made while a band colour is live counts exactly the dotted band polylines.
+const BAND_COLORS = ["#26A69A", "#03A9F4", "#F44336", "#AB47BC"];
+function countBandPolylines(ctx: RecordingCtx): number {
+  let cur: string | null = null;
+  let n = 0;
+  for (const e of ctx.seq) {
+    if (e.kind === "set" && e.prop === "strokeStyle") cur = String(e.value);
+    else if (e.kind === "call" && e.m === "stroke" && cur !== null && BAND_COLORS.indexOf(cur) >= 0) n++;
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +202,7 @@ interface PaintResult {
 // Evaluate the real CHART_JS against the stubs, mount, feed the fit + prices,
 // then reset the recorders and force ONE clean full paint so the assertions see
 // exactly one frame that has both the model and the prices present.
-function runPaint(prefs?: Record<string, unknown>): PaintResult {
+function runPaint(prefs?: Record<string, unknown>, model?: unknown): PaintResult {
   const mainCtx = makeRecordingCtx();
   const oscCtx = makeRecordingCtx();
   const mainCanvas = makeCanvas(WRAP_W, WRAP_H, mainCtx.proxy);
@@ -224,7 +251,7 @@ function runPaint(prefs?: Record<string, unknown>): PaintResult {
     onPresetCleared: () => {},
   });
   if (prefs) PLChart.setPrefs(prefs);
-  PLChart.setModel(MODEL_PAYLOAD);
+  PLChart.setModel(model === undefined ? MODEL_PAYLOAD : model);
   PLChart.setPrices(PRICE_PAYLOAD);
 
   // Isolate a single clean frame with model + prices in place.
@@ -323,4 +350,53 @@ test("with the oscillator enabled the osc canvas also paints", () => {
   const off = runPaint({ oscillator: false });
   const offOscLineTos = off.oscCtx.calls.filter((c) => c.m === "lineTo").length;
   assert.equal(offOscLineTos, 0, "osc drew segments while disabled (" + offOscLineTos + ")");
+});
+
+// (7) v0.1.1: with 8-key offsets and all pairs on, EIGHT dotted band polylines
+//     are drawn and the two NEW pair colours (teal 50%, purple 99%) are used.
+test("8-key offsets with all pairs on draw eight band polylines incl. the new teal/purple", () => {
+  const h = paint(); // default prefs => all four pairs visible; MODEL_PAYLOAD has 8 keys
+  // sanity: the fixture-derived offsets really do carry all eight keys
+  const offs = BAND_OFFSETS as unknown as Record<string, number>;
+  for (const k of ["p005", "p025", "p165", "p25", "p75", "p835", "p975", "p995"]) {
+    assert.ok(typeof offs[k] === "number", "fixture bandOffsets missing key " + k);
+  }
+  const bands = countBandPolylines(h.mainCtx);
+  assert.equal(bands, 8, "expected 8 dotted band polylines (4 pairs x 2), got " + bands);
+  const strokeColors = new Set(
+    h.mainCtx.sets.filter((s) => s.prop === "strokeStyle").map((s) => String(s.value)),
+  );
+  assert.ok(strokeColors.has("#26A69A"), "50% pair teal #26A69A never stroked");
+  assert.ok(strokeColors.has("#AB47BC"), "99% pair purple #AB47BC never stroked");
+});
+
+// (8) v0.1.1 backward-compat: a model whose bandOffsets predates v0.1.1 (only the
+//     four classic keys) must paint WITHOUT throwing and draw exactly the 4
+//     classic band polylines — the 50%/99% pairs simply no-op on missing keys.
+test("4-key (pre-v0.1.1) offsets draw exactly four band lines and never throw", () => {
+  const fourKeyOffsets = {
+    p025: BAND_OFFSETS.p025,
+    p165: BAND_OFFSETS.p165,
+    p835: BAND_OFFSETS.p835,
+    p975: BAND_OFFSETS.p975,
+  };
+  const fourKeyModel = { ...MODEL_PAYLOAD, bandOffsets: fourKeyOffsets };
+
+  let err: unknown = null;
+  let res: PaintResult | null = null;
+  try {
+    res = runPaint(undefined, fourKeyModel);
+  } catch (e) {
+    err = e;
+  }
+  assert.equal(err, null, "painting a 4-key (old) model threw: " + String(err));
+  assert.ok(res, "no paint result for the 4-key model");
+  const bands = countBandPolylines((res as PaintResult).mainCtx);
+  assert.equal(bands, 4, "expected exactly 4 band polylines for a 4-key model, got " + bands);
+  // the two new-pair colours must be absent when their keys are missing
+  const strokeColors = new Set(
+    (res as PaintResult).mainCtx.sets.filter((s) => s.prop === "strokeStyle").map((s) => String(s.value)),
+  );
+  assert.ok(!strokeColors.has("#26A69A"), "50% teal drew despite missing p25/p75 keys");
+  assert.ok(!strokeColors.has("#AB47BC"), "99% purple drew despite missing p005/p995 keys");
 });

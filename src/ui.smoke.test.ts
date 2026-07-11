@@ -36,6 +36,61 @@ test("dashboard contains every readout id the app writes to", () => {
   }
 });
 
+test("dashboard has an info button for every readout tile and settings field", () => {
+  // one 16px circled-i popover trigger per readout tile...
+  const readoutHelp = [
+    "fairValue", "deviation", "quantile", "exponentN", "coeffA",
+    "r2", "sigma", "days", "nextRefit"
+  ];
+  // ...and per settings field / the sources fieldset (spec 11.2)
+  const settingsHelp = [
+    "refitInterval", "spotPoll", "projectionEndYear", "bandMode",
+    "sourceMode", "enabledSources"
+  ];
+  assert.ok(DASHBOARD_HTML.includes('class="infobtn"'), "no info button markup present");
+  for (const id of readoutHelp.concat(settingsHelp)) {
+    assert.ok(
+      DASHBOARD_HTML.includes('data-help="' + id + '"'),
+      "missing info button for " + id,
+    );
+  }
+  // every info trigger is keyboard/AT reachable and starts collapsed
+  assert.ok(DASHBOARD_HTML.includes('aria-expanded="false"'), "info button missing aria-expanded");
+  // the single shared popover host exists
+  assert.ok(DASHBOARD_HTML.includes('id="infoPop"'), "shared info popover host missing");
+  // the header spot ticker carries its explanatory title (spec 11.2)
+  assert.ok(
+    DASHBOARD_HTML.includes("Live price: median of the exchange sources currently responding"),
+    "header spot ticker title string missing",
+  );
+});
+
+test("dashboard has the collapsible chart explainer panel with its verbatim copy", () => {
+  assert.ok(DASHBOARD_HTML.includes('id="explainPanel"'), "explainer panel container missing");
+  assert.ok(DASHBOARD_HTML.includes('id="explainToggle"'), "explainer toggle button missing");
+  assert.ok(DASHBOARD_HTML.includes("What am I looking at?"), "explainer heading missing");
+  // one distinctive marker phrase from each of the four verbatim paragraphs
+  const markers = [
+    "the ring at the end is the live price for today",
+    "half of all days fall inside the teal pair",
+    "The hatched area past ~2040 is where the model's own authors",
+    "it is the same information as the bands, flattened out"
+  ];
+  for (const m of markers) {
+    assert.ok(DASHBOARD_HTML.includes(m), "explainer panel missing paragraph marker: " + m);
+  }
+});
+
+test("dashboard has the band legend row with the four toggleable pairs", () => {
+  for (const key of ["50", "67", "95", "99"]) {
+    assert.ok(DASHBOARD_HTML.includes('id="lg_' + key + '"'), "legend chip lg_" + key + " missing");
+    assert.ok(DASHBOARD_HTML.includes('data-band="' + key + '"'), "legend chip data-band " + key + " missing");
+  }
+  // Price and Trend static indicators are present too
+  assert.ok(DASHBOARD_HTML.includes('id="chartLegend"'), "legend row container missing");
+  assert.ok(DASHBOARD_HTML.includes('aria-pressed="true"'), "band chips missing aria-pressed");
+});
+
 test("dashboard inlines CHART_JS and APP_JS (markers + bodies)", () => {
   assert.ok(DASHBOARD_HTML.includes("PLCHART_ENGINE"), "CHART_JS marker not inlined");
   assert.ok(DASHBOARD_HTML.includes("PLAPP_MAIN"), "APP_JS marker not inlined");

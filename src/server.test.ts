@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -183,6 +183,11 @@ test('GET /api/status + /api/model: populated after a refit', async () => {
       assert.ok('bandOffsets' in model.body.data);
       assert.ok('falsifiability' in model.body.data);
       assert.equal(model.body.data.milestones.crossings.length, 3);
+      // A fresh v0.1.1 fit serves all eight band keys, non-decreasing in p-order.
+      const bo = model.body.data.bandOffsets;
+      const inPOrder = [bo.p005, bo.p025, bo.p165, bo.p25, bo.p75, bo.p835, bo.p975, bo.p995];
+      for (const v of inPOrder) assert.equal(typeof v, 'number');
+      for (let i = 1; i < inPOrder.length; i++) assert.ok(inPOrder[i] >= inPOrder[i - 1]);
     });
   } finally {
     cleanup();
@@ -199,6 +204,74 @@ test('GET /api/model: 404-style {ok:false} before the first fit', async () => {
     });
   } finally {
     cleanup();
+  }
+});
+
+test('GET /api/model: serves a pre-v0.1.1 4-key bandOffsets record as-is (backward-compat)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-legacy-model-'));
+  try {
+    // A model.json written before the v0.1.1 band fan: bandOffsets carries only
+    // the original four keys. ModelStore.load must not crash on the missing keys,
+    // and /api/model must serve the record unchanged (no refit has happened yet).
+    const legacyOffsets = { p025: -0.5, p165: -0.2, p835: 0.2, p975: 0.5 };
+    const legacy = {
+      current: {
+        fittedAt: '2026-01-01T00:00:00.000Z',
+        a: -16.8,
+        n: 5.7,
+        A: Math.pow(10, -16.8),
+        r2: 0.95,
+        sigma: 0.28,
+        points: 5800,
+        dataStart: '2010-07-18',
+        dataEnd: '2025-12-31',
+        bandMode: 'fullSample',
+        bandOffsets: legacyOffsets,
+        includesProvisionalSpot: false,
+        durationMs: 1234,
+      },
+      history: [],
+    };
+    writeFileSync(join(dir, 'model.json'), JSON.stringify(legacy));
+
+    const settings = new SettingsStore(dir, defaultSettings());
+    const getSettings = () => settings.get();
+    const registry = new SourceRegistry(createMockSources());
+    const priceStore = new PriceStore();
+    const modelStore = new ModelStore(dir); // loads the legacy record from disk
+    const jobStats = new JobStats();
+    const events = new EventLog();
+    const spot = new SpotAggregator(registry, getSettings);
+    const jobRunner = new JobRunner({ registry, priceStore, spot, getSettings, modelStore, jobStats, events });
+    const ctx: AppContext = {
+      settings,
+      priceStore,
+      modelStore,
+      spot,
+      jobRunner,
+      registry,
+      events,
+      mock: true,
+      startedAt: new Date().toISOString(),
+      version: '0.1.1',
+      gitSha: 'test-sha',
+    };
+
+    // Loaded without throwing, keeping the four legacy keys verbatim.
+    assert.deepEqual(modelStore.current()!.bandOffsets, legacyOffsets);
+
+    await withServer(ctx, async (baseUrl) => {
+      const { status, body } = await getJSON(baseUrl, '/api/model');
+      assert.equal(status, 200);
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.data.bandOffsets, legacyOffsets);
+      // Missing new keys are simply absent (the pairs aren't drawn until a refit).
+      for (const k of ['p005', 'p25', 'p75', 'p995']) {
+        assert.ok(!(k in body.data.bandOffsets), `unexpected ${k} served for a legacy record`);
+      }
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

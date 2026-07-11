@@ -135,8 +135,11 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   var RANGES = { "full": 1, "history": 1, "4y": 1, "1y": 1, "6m": 1 };
   var prefs = loadPrefs();
 
+  // band-visibility keys mirror the chart engine's BAND_PAIRS keys; default all on.
+  var BAND_KEYS = ["50", "67", "95", "99"];
   function loadPrefs() {
-    var d = { xMode: "date", yMode: "log", bandFill: false, halvings: true, oscillator: true, preset: "full" };
+    var d = { xMode: "date", yMode: "log", bandFill: false, halvings: true, oscillator: true, preset: "full",
+              bands: { "50": true, "67": true, "95": true, "99": true }, explain: false };
     try {
       var raw = window.localStorage.getItem(PREF_KEY);
       if (raw) {
@@ -147,6 +150,13 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
         if (typeof p.halvings === "boolean") d.halvings = p.halvings;
         if (typeof p.oscillator === "boolean") d.oscillator = p.oscillator;
         if (RANGES[p.preset]) d.preset = p.preset;
+        if (typeof p.explain === "boolean") d.explain = p.explain;
+        if (p.bands && typeof p.bands === "object") {
+          for (var i = 0; i < BAND_KEYS.length; i++) {
+            var bk = BAND_KEYS[i];
+            if (typeof p.bands[bk] === "boolean") d.bands[bk] = p.bands[bk];
+          }
+        }
       }
     } catch (e) { /* ignore corrupt prefs */ }
     return d;
@@ -178,7 +188,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
       oscWrap: $("oscWrap"),
       onPresetCleared: function () { prefs.preset = ""; markActiveRange(); }
     });
-    window.PLChart.setPrefs({ xMode: prefs.xMode, yMode: prefs.yMode, bandFill: prefs.bandFill, halvings: prefs.halvings, oscillator: prefs.oscillator });
+    window.PLChart.setPrefs({ xMode: prefs.xMode, yMode: prefs.yMode, bandFill: prefs.bandFill, halvings: prefs.halvings, oscillator: prefs.oscillator, bands: prefs.bands });
     if (prefs.preset) window.PLChart.setPreset(prefs.preset);
     chartReady = true;
   }
@@ -200,6 +210,55 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     });
     markActiveMode(); markActiveRange(); markToggles();
     show("oscWrap", prefs.oscillator);
+    wireLegend(); wireExplain();
+  }
+
+  // ---- band legend chips (v0.1.1) -----------------------------------------
+  // Each of the four band chips click-toggles its pair's visibility, persisted in
+  // prefs.bands and pushed to the chart via setPrefs({bands:{...}}). Price/Trend
+  // are static indicators. aria-pressed + a muted class reflect the on/off state.
+  function wireLegend() {
+    for (var i = 0; i < BAND_KEYS.length; i++) {
+      (function (key) {
+        var el = $("lg_" + key);
+        if (!el) return;
+        el.addEventListener("click", function () {
+          prefs.bands[key] = !prefs.bands[key];
+          savePrefs();
+          setLegendChip(key);
+          var patch = { bands: {} };
+          patch.bands[key] = prefs.bands[key];
+          if (window.PLChart) window.PLChart.setPrefs(patch);
+        });
+      })(BAND_KEYS[i]);
+    }
+    markLegend();
+  }
+  function markLegend() { for (var i = 0; i < BAND_KEYS.length; i++) setLegendChip(BAND_KEYS[i]); }
+  function setLegendChip(key) {
+    var el = $("lg_" + key);
+    if (el) el.setAttribute("aria-pressed", prefs.bands[key] !== false ? "true" : "false");
+  }
+
+  // ---- chart explainer panel (v0.1.1) -------------------------------------
+  // Collapsible "What am I looking at?" panel; open/closed state persisted in
+  // prefs.explain (default collapsed). Folds in the old interaction-hint line.
+  function wireExplain() {
+    var btn = $("explainToggle");
+    if (!btn) return;
+    applyExplain();
+    btn.addEventListener("click", function () {
+      prefs.explain = !prefs.explain;
+      savePrefs();
+      applyExplain();
+    });
+  }
+  function applyExplain() {
+    var open = !!prefs.explain;
+    show("explainPanel", open);
+    var btn = $("explainToggle");
+    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+    setText("explainChevron", open ? "▾" : "▸");
   }
   function bindSeg(group, values, apply) {
     for (var i = 0; i < values.length; i++) {
@@ -715,6 +774,124 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   }
 
   // =========================================================================
+  //  INFO POPOVERS  (the ⓘ tooltip/explainer system, spec 11.2)
+  // =========================================================================
+  // Static, page-local help copy keyed by the data-help attribute on each ⓘ
+  // button. Every string is a constant baked into the page — never server data —
+  // and is rendered via textContent, so no escaping is involved. The
+  // enabledSources entry is an array so each source one-liner gets its own line.
+  var HELP = {
+    fairValue: "What the fitted power law says is a 'normal' price for today: A x t^n with t = days since genesis. It is the long-run trend value, not a prediction or a target.",
+    deviation: "How far the live price sits from today's fair value: (spot - fair value) / fair value. Negative means price is below trend (historically 'cheap' relative to the curve); positive means above.",
+    quantile: "Where today's deviation ranks against every daily deviation in history. 12% means price has been this far (or further) below trend on only ~12% of all days. 50% = right on the typical day.",
+    exponentN: "The power in price = A x t^n - how steeply price has grown with time. It is re-estimated from the full price history at every refit; nothing is hard-coded. Historically it lands around 5.6-5.8.",
+    coeffA: "The scale constant in price = A x t^n. It looks tiny because t is counted in days and n is large. A and n move together: each refit re-derives both from the data.",
+    r2: "How much of the variation in log price the trend line explains, over the whole history (1.0 = perfect). ~0.96 is a very tight long-run fit - but a high R² alone does not prove the model can predict the future.",
+    sigma: "The typical distance of daily prices from the trend, measured in log10 units. 0.30 is about a factor of 2: price has routinely lived anywhere between half and double the trend.",
+    days: "The t in the formula: whole days elapsed since Bitcoin's genesis block on 2009-01-03. The fitted numbers only make sense against this fixed starting point.",
+    nextRefit: "When the app will next refetch all data and refit the model automatically. Set the cadence in Settings, or press Update model to run one right now.",
+    refitInterval: "How often the model refetches every data source and refits all parameters (n, A, R², sigma, bands). Default 12 hours. Lower = fresher parameters and slightly more API traffic; the fit itself only shifts meaningfully as new daily closes arrive.",
+    spotPoll: "How often the live price refreshes (median of the responding exchanges). This drives the header ticker, the deviation and quantile tiles, and the provisional 'today' point the next refit will use.",
+    projectionEndYear: "How far the trend and bands are drawn into the future on the chart. Anything past ~2040 is hatched because the model's authors themselves say not to rely on it out there.",
+    bandMode: "How the percentile bands are computed. Point-in-time (porkopolis's current method): each day's miss is measured against the trend as it was fitted using only data available up to that day - no hindsight. Full-sample: every day's miss is measured against today's trend line - simpler, but early history is judged with hindsight.",
+    sourceMode: "Auto uses every working source with built-in cross-checks and quorum rules - recommended. Manual lets you choose sources yourself; you must keep a valid history source (blockchain.info, or Bitstamp + Binance together) and at least two spot sources.",
+    enabledSources: [
+      "blockchainInfo: primary daily history since 2010 (multi-exchange average)",
+      "bitstamp: daily history since 2011 + live spot + recent-day fill",
+      "binance: daily history since 2017 + live spot + recent-day fill",
+      "kraken: recent daily candles + live spot",
+      "coinbase: live spot",
+      "mempoolSpace: live spot + coarse history cross-check",
+      "coingecko: last-resort live spot only"
+    ]
+  };
+
+  var infoOpenBtn = null, infoPinned = false;
+
+  function closestInfoBtn(el) {
+    while (el && el.nodeType === 1) {
+      if (el.classList && el.classList.contains("infobtn")) return el;
+      el = el.parentNode;
+    }
+    return null;
+  }
+  function inPopover(el) {
+    while (el && el.nodeType === 1) { if (el.id === "infoPop") return true; el = el.parentNode; }
+    return false;
+  }
+  // Position the shared popover under (or, if it would overflow, above) the button,
+  // clamped to stay inside the viewport. Uses position:fixed viewport coordinates.
+  function positionPopover(btn) {
+    var pop = $("infoPop"); if (!pop) return;
+    var r = btn.getBoundingClientRect();
+    var pw = pop.offsetWidth, ph = pop.offsetHeight;
+    var vw = window.innerWidth || document.documentElement.clientWidth;
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    var left = r.left + r.width / 2 - pw / 2;
+    if (left + pw > vw - 8) left = vw - 8 - pw;
+    if (left < 8) left = 8;
+    var top = r.bottom + 6;
+    if (top + ph > vh - 8) { var above = r.top - ph - 6; top = above >= 8 ? above : Math.max(8, vh - 8 - ph); }
+    pop.style.left = Math.round(left) + "px";
+    pop.style.top = Math.round(top) + "px";
+  }
+  function openInfo(btn, pin) {
+    var body = HELP[btn.getAttribute("data-help")];
+    if (body == null) return;
+    var pop = $("infoPop"); if (!pop) return;
+    if (infoOpenBtn && infoOpenBtn !== btn) { infoOpenBtn.setAttribute("aria-expanded", "false"); infoOpenBtn.removeAttribute("aria-describedby"); }
+    pop.textContent = "";
+    var lines = Array.isArray(body) ? body : [body];
+    for (var i = 0; i < lines.length; i++) {
+      var d = document.createElement("div");
+      d.className = "infopop-line";
+      d.textContent = lines[i];
+      pop.appendChild(d);
+    }
+    pop.classList.add("show");
+    positionPopover(btn);
+    infoOpenBtn = btn; infoPinned = !!pin;
+    btn.setAttribute("aria-expanded", "true");
+    btn.setAttribute("aria-describedby", "infoPop");
+  }
+  function closeInfo() {
+    var pop = $("infoPop");
+    if (pop) pop.classList.remove("show");
+    if (infoOpenBtn) { infoOpenBtn.setAttribute("aria-expanded", "false"); infoOpenBtn.removeAttribute("aria-describedby"); }
+    infoOpenBtn = null; infoPinned = false;
+  }
+  // hover opens; click/tap toggles (pins); Escape/outside-click closes; one at a time.
+  function wireInfo() {
+    document.addEventListener("mouseover", function (ev) {
+      if (infoPinned) return;
+      var btn = closestInfoBtn(ev.target);
+      if (btn && btn !== infoOpenBtn) openInfo(btn, false);
+    });
+    document.addEventListener("mouseout", function (ev) {
+      if (infoPinned || !infoOpenBtn) return;
+      var to = ev.relatedTarget;
+      if (to && (closestInfoBtn(to) === infoOpenBtn || inPopover(to))) return;
+      var from = ev.target;
+      if (closestInfoBtn(from) === infoOpenBtn || inPopover(from)) closeInfo();
+    });
+    document.addEventListener("click", function (ev) {
+      var btn = closestInfoBtn(ev.target);
+      if (btn) {
+        ev.preventDefault();
+        if (infoOpenBtn === btn && infoPinned) closeInfo();
+        else openInfo(btn, true);
+        return;
+      }
+      if (!inPopover(ev.target)) closeInfo();
+    });
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" || ev.keyCode === 27) closeInfo();
+    });
+    window.addEventListener("resize", function () { if (infoOpenBtn) positionPopover(infoOpenBtn); });
+    window.addEventListener("scroll", function () { if (infoOpenBtn) positionPopover(infoOpenBtn); }, true);
+  }
+
+  // =========================================================================
   //  TICKER + BOOT
   // =========================================================================
   function tick() {
@@ -732,6 +909,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     wireControls();
     wireUpdateButton();
     wireSettings();
+    wireInfo();
     // Boot-time loads force through the document.hidden guard so a page opened in
     // a background tab is fully populated (the interval pollers below keep it).
     loadSettings().then(function () { loadStatus(true); });

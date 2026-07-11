@@ -5,11 +5,13 @@
 An [Umbrel](https://umbrel.com/) app that keeps a Bitcoin power-law model - `price = A * t^n`, where `t`
 is days since the genesis block (2009-01-03 UTC) - continuously refit against the freshest data it can
 find, and charts it the way [porkopolis.io/thechart](https://porkopolis.io/thechart) does: a power
-regression plus four residual-percentile bands, projected out to 2045. Nothing about the fitted curve is
-hard-coded anywhere in this repo - every coefficient, band, and milestone the dashboard shows is
+regression plus four residual-percentile band pairs, projected out to 2045. Nothing about the fitted curve
+is hard-coded anywhere in this repo - every coefficient, band, and milestone the dashboard shows is
 recomputed from data each time the model refits. The published values you may have seen elsewhere
 (exponent `n` around 5.7, `R²` around 0.95) only ever appear here as test-tolerance corridors and in this
-README's prose, never as defaults the app falls back to.
+README's prose, never as defaults the app falls back to. Every readout tile, chart, and settings field also
+carries a built-in explainer (small (i) buttons and a collapsible "What am I looking at?" chart panel) that
+spells out in plain English what the number means and where it comes from, without leaving the dashboard.
 
 ## The model
 
@@ -29,8 +31,12 @@ Letting the epoch be a setting would silently invalidate every fit history entry
 something for Bitcoin (the chain's own start) is the only anchor that doesn't need a disclaimer of its
 own.
 
-Two ways of computing the four residual-percentile bands (2.5 / 16.5 / 83.5 / 97.5) are supported, both
-against the same slope/intercept fit:
+Two ways of computing the residual-percentile bands are supported, both against the same slope/intercept
+fit. Each way produces four percentile-band **pairs**, drawn on the chart cool-to-hot as they widen and
+each toggleable from a legend chip: 25/75 (**50%** of history inside, teal `#26A69A`), 16.5/83.5 (**67%**,
+blue `#03A9F4`), 2.5/97.5 (**95%**, red `#F44336`), and 0.5/99.5 (**99%**, purple `#AB47BC`, the
+near-never-breached envelope). Clicking a legend chip shows or hides that pair (on the chart, in the
+tooltip, and in the oscillator's guide lines); all four are on by default.
 
 - **`fullSample`** - percentiles of the residuals from the single regression run across the entire
   history, interpolated linearly between order statistics. Simple, but it lets *future* data (relative to

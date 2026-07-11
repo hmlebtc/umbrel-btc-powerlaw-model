@@ -149,6 +149,38 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .pltip-k { color: var(--muted); }
   .pltip-v { font-variant-numeric: tabular-nums; font-weight: 600; }
 
+  /* Chart legend (v0.1.1): Price/Trend indicators + click-toggle band chips */
+  .chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; margin-bottom: 12px; }
+  .lg { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .lg-sw { width: 15px; height: 3px; border-radius: 2px; flex: none; }
+  button.lg-band { font: inherit; font-size: 12px; color: var(--text); background: none; border: 1px solid transparent; border-radius: 8px; padding: 3px 8px; cursor: pointer; }
+  button.lg-band:hover { border-color: var(--border2); }
+  button.lg-band:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .lg-band[aria-pressed="false"] { opacity: .42; }
+  .lg-band[aria-pressed="false"] .lg-sw { opacity: .5; }
+
+  /* Info ⓘ popover system (v0.1.1) */
+  .infobtn { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; margin-left: 5px; border-radius: 50%; border: 1px solid var(--border2); background: var(--card2); color: var(--muted); font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700; font-size: 10px; line-height: 1; cursor: pointer; vertical-align: middle; flex: none; }
+  .infobtn:hover, .infobtn[aria-expanded="true"] { border-color: var(--blue); color: var(--blue); }
+  .infobtn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .infopop { position: fixed; z-index: 120; max-width: 300px; display: none; background: rgba(11,17,28,0.98); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5; color: var(--text); box-shadow: 0 10px 30px rgba(0,0,0,0.55); }
+  .infopop.show { display: block; }
+  .infopop-line { margin: 0; }
+  .infopop-line + .infopop-line { margin-top: 6px; }
+
+  /* Collapsible "What am I looking at?" chart explainer (v0.1.1) */
+  .explain-toggle { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; }
+  .explain-toggle:hover { color: var(--text); }
+  .explain-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  .explain-chev { display: inline-block; }
+  .chart-explain { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 15px; margin-bottom: 12px; }
+  .chart-explain p { margin: 0 0 8px; font-size: 13px; line-height: 1.58; color: var(--muted); }
+  .chart-explain p:last-child { margin-bottom: 0; }
+
+  /* Settings label + ⓘ button row */
+  .field-head { display: flex; align-items: center; gap: 5px; }
+  .field-head label { flex: 0 1 auto; }
+
   .milestones { display: flex; flex-wrap: wrap; gap: 12px; }
   .mstile { flex: 1 1 130px; background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; text-align: center; min-width: 0; }
   .mstile .l { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
@@ -242,7 +274,7 @@ const PAGE_BODY: string = String.raw`</span>
   <span class="grow"></span>
   <span class="conn-note" id="connNote" style="display:none">reconnecting&hellip;</span>
   <span class="pill pill-job" id="jobBadge" style="display:none">Updating&hellip;</span>
-  <div class="spot" aria-live="polite">
+  <div class="spot" aria-live="polite" title="Live price: median of the exchange sources currently responding (count shown). Refreshes every spot-poll interval.">
     <div class="spot-row"><span id="spotPrice">&mdash;</span><span class="badge-stale" id="spotStale" style="display:none">stale</span></div>
     <span id="spotMeta"><span class="muted">&hellip;</span></span>
   </div>
@@ -272,22 +304,29 @@ const PAGE_BODY: string = String.raw`</span>
 <main>
   <section class="card" id="readoutsCard" aria-label="Model readouts">
     <div class="ro-grid">
-      <div class="ro"><div class="ro-l">Fair value now</div><div class="ro-v" id="ro_fairValue">&mdash;</div><div class="ro-sub">trend price today</div></div>
-      <div class="ro"><div class="ro-l">Deviation</div><div class="ro-v" id="ro_deviation">&mdash;</div><div class="ro-sub">spot vs trend</div></div>
-      <div class="ro"><div class="ro-l">Current quantile</div><div class="ro-v" id="ro_quantile">&mdash;</div><div class="ro-sub">residual percentile</div></div>
-      <div class="ro"><div class="ro-l">Exponent n</div><div class="ro-v" id="ro_n">&mdash;</div><div class="ro-sub" id="ro_n_sub"></div></div>
-      <div class="ro"><div class="ro-l">Coefficient A</div><div class="ro-v" id="ro_A">&mdash;</div><div class="ro-sub" id="ro_A_sub"></div></div>
-      <div class="ro"><div class="ro-l">R&#178;</div><div class="ro-v" id="ro_r2">&mdash;</div><div class="ro-sub">goodness of fit</div></div>
-      <div class="ro"><div class="ro-l">&#963; residual</div><div class="ro-v" id="ro_sigma">&mdash;</div><div class="ro-sub">log10 std-dev</div></div>
-      <div class="ro"><div class="ro-l">Days since genesis</div><div class="ro-v" id="ro_days">&mdash;</div><div class="ro-sub">t, epoch 2009-01-03</div></div>
-      <div class="ro"><div class="ro-l">Next auto-refit</div><div class="ro-v" id="ro_nextRefit">&mdash;</div><div class="ro-sub" id="ro_nextRefit_sub"></div></div>
+      <div class="ro"><div class="ro-l">Fair value now <button class="infobtn" type="button" data-help="fairValue" aria-label="About: Fair value now" aria-expanded="false">i</button></div><div class="ro-v" id="ro_fairValue">&mdash;</div><div class="ro-sub">trend price today</div></div>
+      <div class="ro"><div class="ro-l">Deviation <button class="infobtn" type="button" data-help="deviation" aria-label="About: Deviation" aria-expanded="false">i</button></div><div class="ro-v" id="ro_deviation">&mdash;</div><div class="ro-sub">spot vs trend</div></div>
+      <div class="ro"><div class="ro-l">Current quantile <button class="infobtn" type="button" data-help="quantile" aria-label="About: Current quantile" aria-expanded="false">i</button></div><div class="ro-v" id="ro_quantile">&mdash;</div><div class="ro-sub">residual percentile</div></div>
+      <div class="ro"><div class="ro-l">Exponent n <button class="infobtn" type="button" data-help="exponentN" aria-label="About: Exponent n" aria-expanded="false">i</button></div><div class="ro-v" id="ro_n">&mdash;</div><div class="ro-sub" id="ro_n_sub"></div></div>
+      <div class="ro"><div class="ro-l">Coefficient A <button class="infobtn" type="button" data-help="coeffA" aria-label="About: Coefficient A" aria-expanded="false">i</button></div><div class="ro-v" id="ro_A">&mdash;</div><div class="ro-sub" id="ro_A_sub"></div></div>
+      <div class="ro"><div class="ro-l">R&#178; <button class="infobtn" type="button" data-help="r2" aria-label="About: R squared" aria-expanded="false">i</button></div><div class="ro-v" id="ro_r2">&mdash;</div><div class="ro-sub">goodness of fit</div></div>
+      <div class="ro"><div class="ro-l">&#963; residual <button class="infobtn" type="button" data-help="sigma" aria-label="About: sigma residual" aria-expanded="false">i</button></div><div class="ro-v" id="ro_sigma">&mdash;</div><div class="ro-sub">log10 std-dev</div></div>
+      <div class="ro"><div class="ro-l">Days since genesis <button class="infobtn" type="button" data-help="days" aria-label="About: Days since genesis" aria-expanded="false">i</button></div><div class="ro-v" id="ro_days">&mdash;</div><div class="ro-sub">t, epoch 2009-01-03</div></div>
+      <div class="ro"><div class="ro-l">Next auto-refit <button class="infobtn" type="button" data-help="nextRefit" aria-label="About: Next auto-refit" aria-expanded="false">i</button></div><div class="ro-v" id="ro_nextRefit">&mdash;</div><div class="ro-sub" id="ro_nextRefit_sub"></div></div>
     </div>
   </section>
 
   <section class="card" id="chartCard">
     <div class="card-head">
       <h2>Power law chart</h2>
+      <button class="explain-toggle" id="explainToggle" type="button" aria-expanded="false" aria-controls="explainPanel"><span class="explain-chev" id="explainChevron">&#9656;</span> What am I looking at?</button>
       <span class="hint" id="bandModeNote"></span>
+    </div>
+    <div class="chart-explain" id="explainPanel" style="display:none">
+      <p>The green line is Bitcoin's actual daily price; the ring at the end is the live price for today, which isn't final until the day closes. The white line is the power-law trend fitted to the entire history - it is refit from scratch at every update, so it can shift slightly as new data arrives.</p>
+      <p>The dotted bands show where price has historically sat relative to trend: half of all days fall inside the teal pair, two-thirds inside the blue, 95% inside the red, and 99% inside the purple. They are percentiles of the model's own historical misses, not statistical guarantees. Click a legend chip to show or hide a pair.</p>
+      <p>Left of the 'today' line is history; right of it is the same formula extended forward. The hatched area past ~2040 is where the model's own authors say it should not be trusted. Halving lines mark Bitcoin's supply-cut events (dashed ones are estimates).</p>
+      <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to zoom, scroll to zoom at the cursor, double-click to reset.</p>
     </div>
     <div class="chart-controls">
       <div class="ctl-group"><span class="ctl-label">X</span>
@@ -315,6 +354,14 @@ const PAGE_BODY: string = String.raw`</span>
         <button class="pill-btn" id="tgOsc" type="button" aria-pressed="true">Oscillator</button>
       </div>
     </div>
+    <div class="chart-legend" id="chartLegend" role="group" aria-label="Chart series legend and band toggles">
+      <span class="lg"><span class="lg-sw" style="background:#42a04c"></span>Price</span>
+      <span class="lg"><span class="lg-sw" style="background:#ececec"></span>Trend</span>
+      <button class="lg-band" type="button" id="lg_50" data-band="50" aria-pressed="true" aria-label="Toggle the 50% band"><span class="lg-sw" style="background:#26a69a"></span>50%</button>
+      <button class="lg-band" type="button" id="lg_67" data-band="67" aria-pressed="true" aria-label="Toggle the 67% band"><span class="lg-sw" style="background:#03a9f4"></span>67%</button>
+      <button class="lg-band" type="button" id="lg_95" data-band="95" aria-pressed="true" aria-label="Toggle the 95% band"><span class="lg-sw" style="background:#f44336"></span>95%</button>
+      <button class="lg-band" type="button" id="lg_99" data-band="99" aria-pressed="true" aria-label="Toggle the 99% band"><span class="lg-sw" style="background:#ab47bc"></span>99%</button>
+    </div>
     <div id="chartWrap">
       <canvas id="chartCanvas" role="img" aria-label="Bitcoin price with power-law trend and percentile bands"></canvas>
       <div class="pltip" id="chartTip"></div>
@@ -323,7 +370,6 @@ const PAGE_BODY: string = String.raw`</span>
       <div class="osc-title">Price / trend oscillator (log scale)</div>
       <canvas id="oscCanvas" role="img" aria-label="Price to trend ratio oscillator"></canvas>
     </div>
-    <div class="band-note">Drag to zoom &middot; wheel to zoom at cursor &middot; double-click to reset. Bands 2.5 / 16.5 / 83.5 / 97.5 are residual percentiles recomputed each fit; the hatched region marks years beyond the model's stated validity.</div>
   </section>
 
   <section class="card" id="milestonesCard">
@@ -356,24 +402,24 @@ const PAGE_BODY: string = String.raw`</span>
           <legend>Model &amp; schedule</legend>
           <div class="field-3">
             <div class="field">
-              <label for="cfg_refitIntervalHours">Refit interval <span class="lbl-note">(hours, 1&ndash;168)</span></label>
+              <div class="field-head"><label for="cfg_refitIntervalHours">Refit interval <span class="lbl-note">(hours, 1&ndash;168)</span></label><button class="infobtn" type="button" data-help="refitInterval" aria-label="About: Refit interval" aria-expanded="false">i</button></div>
               <input id="cfg_refitIntervalHours" type="number" min="1" max="168" step="1" inputmode="numeric">
               <div class="field-err" id="err_refitIntervalHours"></div>
             </div>
             <div class="field">
-              <label for="cfg_spotPollMinutes">Spot poll <span class="lbl-note">(minutes, 1&ndash;60)</span></label>
+              <div class="field-head"><label for="cfg_spotPollMinutes">Spot poll <span class="lbl-note">(minutes, 1&ndash;60)</span></label><button class="infobtn" type="button" data-help="spotPoll" aria-label="About: Spot poll" aria-expanded="false">i</button></div>
               <input id="cfg_spotPollMinutes" type="number" min="1" max="60" step="1" inputmode="numeric">
               <div class="field-err" id="err_spotPollMinutes"></div>
             </div>
             <div class="field">
-              <label for="cfg_projectionEndYear">Projection end year <span class="lbl-note">(2030&ndash;2055)</span></label>
+              <div class="field-head"><label for="cfg_projectionEndYear">Projection end year <span class="lbl-note">(2030&ndash;2055)</span></label><button class="infobtn" type="button" data-help="projectionEndYear" aria-label="About: Projection end year" aria-expanded="false">i</button></div>
               <input id="cfg_projectionEndYear" type="number" min="2030" max="2055" step="1" inputmode="numeric">
               <div class="field-err" id="err_projectionEndYear"></div>
             </div>
           </div>
           <div class="field-2">
             <div class="field">
-              <label for="cfg_bandMode">Band mode</label>
+              <div class="field-head"><label for="cfg_bandMode">Band mode</label><button class="infobtn" type="button" data-help="bandMode" aria-label="About: Band mode" aria-expanded="false">i</button></div>
               <select id="cfg_bandMode">
                 <option value="pointInTime">Point-in-time (porkopolis post-2025)</option>
                 <option value="fullSample">Full-sample percentiles</option>
@@ -381,7 +427,7 @@ const PAGE_BODY: string = String.raw`</span>
               <div class="field-err" id="err_bandMode"></div>
             </div>
             <div class="field">
-              <label for="cfg_sourceMode">Source mode</label>
+              <div class="field-head"><label for="cfg_sourceMode">Source mode</label><button class="infobtn" type="button" data-help="sourceMode" aria-label="About: Source mode" aria-expanded="false">i</button></div>
               <select id="cfg_sourceMode">
                 <option value="auto">Auto (all sources)</option>
                 <option value="manual">Manual (pick sources)</option>
@@ -391,7 +437,7 @@ const PAGE_BODY: string = String.raw`</span>
           </div>
         </fieldset>
         <fieldset id="sourcesFieldset">
-          <legend>Enabled sources</legend>
+          <legend>Enabled sources <button class="infobtn" type="button" data-help="enabledSources" aria-label="About: Enabled sources" aria-expanded="false">i</button></legend>
           <div class="src-note" id="sourceModeNote"></div>
           <div class="checks">
             <label class="check"><input id="cfg_src_blockchainInfo" type="checkbox"><span>blockchainInfo</span></label>
@@ -422,6 +468,7 @@ const PAGE_BODY: string = String.raw`</span>
 </footer>
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<div class="infopop" id="infoPop" role="tooltip"></div>
 `;
 
 const PAGE_TAIL: string = String.raw`</body>

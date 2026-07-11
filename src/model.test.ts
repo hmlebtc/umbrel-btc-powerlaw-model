@@ -142,6 +142,78 @@ test('computeBandOffsets: pointInTime degrades to fullSample when sample is shor
   assert.deepEqual(pit, full);
 });
 
+// ---------------------------------------------------------------------------
+// v0.1.1 band fan: eight percentiles = four symmetric pairs (spec 11.1).
+// 99% (p005/p995), 95% (p025/p975), 67% (p165/p835), 50% (p25/p75).
+// ---------------------------------------------------------------------------
+
+test('computeBandOffsets: exposes all eight keys, non-decreasing in ascending-p order', () => {
+  const sample = syntheticPowerLaw({
+    a: -16.5,
+    n: 5.69,
+    startT: 1,
+    count: 2500,
+    noiseSigma: 0.15,
+    seed: 42,
+  });
+  const f = fitOLS(sample);
+  const bands = computeBandOffsets(f, sample, 'pointInTime');
+
+  // All four pairs are present (pure addition over the original four keys).
+  assert.deepEqual(
+    Object.keys(bands).sort(),
+    ['p005', 'p025', 'p165', 'p25', 'p75', 'p835', 'p975', 'p995'].sort(),
+  );
+
+  // Offsets are monotonically non-decreasing in ascending percentile order:
+  // 0.5 < 2.5 < 16.5 < 25 < 75 < 83.5 < 97.5 < 99.5 — note p25 (25) sits ABOVE
+  // p165 (16.5), so the key order here is deliberately not the numeric key order.
+  const inPOrder = [
+    bands.p005,
+    bands.p025,
+    bands.p165,
+    bands.p25,
+    bands.p75,
+    bands.p835,
+    bands.p975,
+    bands.p995,
+  ];
+  for (let i = 1; i < inPOrder.length; i++) {
+    assert.ok(
+      (inPOrder[i] as number) >= (inPOrder[i - 1] as number),
+      `not monotone at ${i}: ${inPOrder[i - 1]} -> ${inPOrder[i]}`,
+    );
+  }
+  // Symmetric noise: the 50% pair straddles zero and the 99% pair is the widest.
+  assert.ok(bands.p25 < 0 && bands.p75 > 0);
+  assert.ok(bands.p005 < bands.p025 && bands.p975 < bands.p995);
+});
+
+test('computeBandOffsets: each key maps to its percentile of the banded residual set', () => {
+  const sample = syntheticPowerLaw({ a: -16.5, n: 5.69, startT: 1, count: 2500, noiseSigma: 0.15, seed: 42 });
+  const f = fitOLS(sample);
+  // fullSample -> the banded residual set is exactly residualsForBands(...,'fullSample'),
+  // so the mapping key->percentile can be checked to floating-point equality.
+  const residuals = residualsForBands(sample, f.a, f.n, 'fullSample');
+  const bands = computeBandOffsets(f, sample, 'fullSample');
+  assert.equal(bands.p005, percentile(residuals, 0.5));
+  assert.equal(bands.p025, percentile(residuals, 2.5));
+  assert.equal(bands.p165, percentile(residuals, 16.5));
+  assert.equal(bands.p25, percentile(residuals, 25));
+  assert.equal(bands.p75, percentile(residuals, 75));
+  assert.equal(bands.p835, percentile(residuals, 83.5));
+  assert.equal(bands.p975, percentile(residuals, 97.5));
+  assert.equal(bands.p995, percentile(residuals, 99.5));
+});
+
+test('percentile: hand-computed p005/p995 with interpolation on a small vector', () => {
+  const arr = [0, 10, 20, 30, 40]; // N=5, (N-1) basis
+  // p=0.5  -> rank 0.005*4 = 0.02 -> 0  + (10-0)*0.02 = 0.2
+  assert.ok(Math.abs(percentile(arr, 0.5) - 0.2) < 1e-12, `p005=${percentile(arr, 0.5)}`);
+  // p=99.5 -> rank 0.995*4 = 3.98 -> 30 + (40-30)*0.98 = 39.8
+  assert.ok(Math.abs(percentile(arr, 99.5) - 39.8) < 1e-12, `p995=${percentile(arr, 99.5)}`);
+});
+
 test('residualsForBands: matches the residual set each bandMode actually bands (F4)', () => {
   // Long noised sample so the point-in-time window is populated.
   const sample = syntheticPowerLaw({
