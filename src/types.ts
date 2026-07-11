@@ -226,6 +226,25 @@ export interface EnabledSources {
   coingecko: boolean;
 }
 
+/**
+ * Personal holdings for the year-end table's "My holdings" valuation (spec
+ * section 13.2). Purely a dashboard-entered what-if — it never touches the
+ * model, scheduler or any source. Deliberately NOT env-seeded (personal data);
+ * a fresh install starts empty and disabled.
+ */
+export interface Holdings {
+  /** Whether the year-end table renders in holdings-valuation mode. */
+  enabled: boolean;
+  /** BTC applied to every year unless overridden per-year (0..21,000,000). */
+  globalBtc: number;
+  /**
+   * Per-year BTC overrides keyed by 4-digit UTC year (`"YYYY"`, 2009..2060),
+   * each 0..21,000,000. At most 60 entries. A PUT REPLACES this map wholesale
+   * (it is not deep-merged with the entries already on disk).
+   */
+  perYear: Record<string, number>;
+}
+
 export interface Settings {
   /** Auto-refit cadence in hours (1-168). */
   refitIntervalHours: number;
@@ -238,6 +257,8 @@ export interface Settings {
   /** `auto` uses every source; `manual` honours enabledSources. */
   sourceMode: SourceMode;
   enabledSources: EnabledSources;
+  /** Year-end table holdings valuation (spec section 13.2). */
+  holdings: Holdings;
 }
 
 // ---------------------------------------------------------------------------

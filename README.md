@@ -56,6 +56,13 @@ optimistic ceilings, more pessimistic floors); `pointInTime` paints a **narrower
 funnel. Neither is a prediction - the bands describe how far price has historically wandered from trend,
 nothing more.
 
+On the chart itself, a left-drag now **pans** the visible time window (the cursor turns into a grab hand)
+instead of selecting a zoom range - hold **Shift** while dragging for the old range-select-to-zoom behavior,
+still with a visible selection rectangle. Scrolling zooms in and out centered on the cursor, and a
+double-click resets to the default view; a single-finger drag on touch devices pans the same way
+(pinch-to-zoom isn't implemented yet). A drag shorter than about 4 pixels is treated as a click rather than
+a pan, so double-clicking still works reliably and panning never eats an accidental small movement.
+
 Alongside the chart, a collapsible **year-end model table** lists every calendar year from 2010 through the
 configured projection end year: the actual stored closing price where one exists (the current year is
 marked as still in progress), next to the current fit's trend and default four percentile lines at that
@@ -64,6 +71,24 @@ whole table shifts in step with every refit. Years past ~2040 are muted in the t
 validity-horizon reason the chart hatches them. The main chart itself is bigger by default (a
 viewport-responsive height and a wider page container on large screens) to give the fuller band fan room to
 breathe.
+
+The table has two view modes, switched with a **Price | My holdings** toggle in its header. Price mode shows
+the raw USD figures described above; **My holdings** mode instead multiplies every value - the actual close
+and every visible model line - by a BTC amount you enter, so the table reads in the currency of *your* stack
+rather than dollars-per-coin. Enter one **BTC held** amount that applies to every year, or override
+individual years in the per-row **BTC** column if you plan to keep accumulating over time (a blank row falls
+back to the global amount). **Holdings amounts are stored only in this app's own `settings.json`, on your
+own Umbrel, behind its login - they are never sent anywhere else.** Unlike every other setting in the
+[configuration reference](#configuration-reference) below, holdings deliberately has **no** `BPL_*`
+environment-variable seed, because it's personal data you type into the dashboard, not deployment
+configuration. This is a what-if illustration of relative outcomes, not financial advice.
+
+In both view modes, every model column for a year with a known actual close (past years, plus the
+in-progress current year) has its text tinted **green** (`#42A04C`) when that line's price sat at or above
+the actual close for that year, and **red** (`#EF5350`) when it sat below - a quick visual read of which
+lines actually contained reality, not a judgment of whether the model - or the price - did "well." Holdings
+mode compares the same underlying prices (scaling both sides by the same BTC amount doesn't change which
+side is bigger), so the tinting is identical between the two views. Future years are never tinted.
 
 ## Data sources
 
@@ -155,6 +180,15 @@ dashboard can flag exactly what didn't take.
 | Band mode | `bandMode` | `BPL_BAND_MODE` | `pointInTime` (or `fullSample`) |
 | Source mode | `sourceMode` | `BPL_SOURCE_MODE` | `auto` (or `manual`) |
 | Enabled sources (manual mode only) | `enabledSources.<name>` | - | all `true` |
+| My holdings mode (year-end table) | `holdings.enabled` | - (dashboard only, see note) | `false` |
+| BTC held - global (year-end table) | `holdings.globalBtc` | - (dashboard only, see note) | `0` |
+| BTC held - per year (year-end table) | `holdings.perYear.<YYYY>` | - (dashboard only, see note) | `{}` (unset) |
+
+Unlike everything else in the table above, **`holdings` has no `BPL_*` environment-variable seed at all.**
+It's personal data - how much BTC you hold or plan to hold - typed directly into the year-end table's "My
+holdings" mode, not deployment configuration a container should ship with. It lives only in this app's own
+`settings.json` on your Umbrel's `/data` volume, behind Umbrel's login, and is never transmitted anywhere
+else; see [the year-end table's holdings mode above](#the-model) for details.
 
 `BPL_HTTP_PORT` (default `3013`) and `BPL_DATA_DIR` (default `/data`) are process-level env vars, read at
 startup only - they're not part of `settings.json` and aren't editable from the dashboard.

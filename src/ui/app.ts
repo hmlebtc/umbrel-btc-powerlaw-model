@@ -624,7 +624,95 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     if (lastModel && lastModel.projection && lastModel.projection.cautionAfterYear) return lastModel.projection.cautionAfterYear;
     return 2040;
   }
+  // =========================================================================
+  //  HOLDINGS VALUATION (v0.1.3, spec 13.2 — settings.holdings, server-side)
+  // =========================================================================
+  // settings.holdings = { enabled, globalBtc, perYear:{"YYYY":btc} }. All three
+  // are always PUT together (perYear replaces the whole object per spec). currentHoldings
+  // normalizes the settings cache into that exact shape (defensive: the field may be
+  // absent on a pre-0.1.3 backend). The table shows either raw prices (Price mode) or
+  // holdings x price (My-holdings mode).
+  function currentHoldings() {
+    var h = (settingsCache && settingsCache.holdings) || {};
+    var perYear = {};
+    if (h.perYear && typeof h.perYear === "object") {
+      for (var k in h.perYear) {
+        if (!Object.prototype.hasOwnProperty.call(h.perYear, k)) continue;
+        var v = Number(h.perYear[k]);
+        if (isFinite(v)) perYear[k] = v;
+      }
+    }
+    var g = Number(h.globalBtc);
+    return { enabled: !!h.enabled, globalBtc: isFinite(g) ? g : 0, perYear: perYear };
+  }
+  // Effective BTC for a year: its per-year override if set, else the global amount.
+  function holdingsForYear(y, h) {
+    var ov = h.perYear[String(y)];
+    return (typeof ov === "number" && isFinite(ov)) ? ov : h.globalBtc;
+  }
+  // BTC amount up to 8 decimals, trailing zeros (and a bare dot) trimmed.
+  function fmtBtc(x) {
+    if (x == null || !isFinite(x)) return "";
+    var s = Number(x).toFixed(8);
+    if (s.indexOf(".") >= 0) { s = s.replace(/0+$/, ""); s = s.replace(/\.$/, ""); }
+    return s;
+  }
+  // Build a clone of the holdings object with one field changed, ready to PUT.
+  function holdingsClone(h) {
+    var perYear = {};
+    for (var k in h.perYear) { if (Object.prototype.hasOwnProperty.call(h.perYear, k)) perYear[k] = h.perYear[k]; }
+    return { enabled: h.enabled, globalBtc: h.globalBtc, perYear: perYear };
+  }
+  // PUT the full holdings object; on success adopt the server echo and re-render, on
+  // failure toast and re-render from the last known-good cache (reverting the control).
+  async function putHoldings(next) {
+    var res = await apiPut("/api/settings", { holdings: next });
+    if (res.ok) {
+      settingsCache = res.data || settingsCache;
+      renderYearTable();
+    } else {
+      toast(res.error || "Could not update holdings", "error");
+      if (res.errors && res.errors.length) toast(res.errors.join("; "), "error");
+      renderYearTable();
+    }
+  }
+
+  // Reflect holdings state onto the mode toggle, header rows, and global input.
+  function syncHoldingsControls(h) {
+    var on = h.enabled;
+    var pe = $("ytMode_price"), he = $("ytMode_holdings");
+    if (pe) { pe.className = "seg" + (on ? "" : " seg-on"); pe.setAttribute("aria-pressed", on ? "false" : "true"); }
+    if (he) { he.className = "seg" + (on ? " seg-on" : ""); he.setAttribute("aria-pressed", on ? "true" : "false"); }
+    show("ytHeadPrice", !on);
+    show("ytHeadHoldings", on);
+    show("ytHoldingsControl", on);
+    var gi = $("ytGlobalBtc");
+    if (gi && document.activeElement !== gi) gi.value = h.globalBtc ? fmtBtc(h.globalBtc) : "";
+  }
+
+  // One model cell: price*scale, tinted vs the year's actual close price (green when
+  // the line sat at or above the actual, red when below). Comparison is on PRICES so
+  // holdings scale both sides equally and never introduces float noise. off=0 is the
+  // Trend; an absent percentile offset (pre-0.1.2 fit) renders an em-dash, untinted.
+  function valCell(m, ms, off, actualPrice, scale) {
+    if (typeof off !== "number" || !isFinite(off)) return "<td>—</td>";
+    var price = modelUsdAt(m, ms, off);
+    var cls = "";
+    if (actualPrice != null && isFinite(actualPrice)) cls = price >= actualPrice ? "yt-hi" : "yt-lo";
+    return "<td" + (cls ? ' class="' + cls + '"' : "") + ">" + esc(fmtUSD(price * scale)) + "</td>";
+  }
+  function modelCells(m, dec31, offs, actualPrice, scale) {
+    if (!(m && m.a != null && m.n != null)) return "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
+    return valCell(m, dec31, offs.p025, actualPrice, scale) +
+      valCell(m, dec31, offs.p165, actualPrice, scale) +
+      valCell(m, dec31, 0, actualPrice, scale) +
+      valCell(m, dec31, offs.p835, actualPrice, scale) +
+      valCell(m, dec31, offs.p975, actualPrice, scale);
+  }
+
   function renderYearTable() {
+    var h = currentHoldings();
+    syncHoldingsControls(h);
     var body = $("yearTableRows");
     if (!body) return;
     var m = lastModel;
@@ -632,48 +720,107 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     var caution = cautionYear();
     var nowY = currentUtcYear();
     var offs = (m && m.bandOffsets) || {};
+    var mode = h.enabled;
     var html = "";
     var anyBeyond = false;
     for (var y = 2010; y <= endY; y++) {
       var dec31 = Date.UTC(y, 11, 31);
-      // Actual close cell: last stored price of the year; current year gets the
-      // in-progress '·' marker; future years show an em-dash.
-      var actualTd;
       var close = lastCloseOfYear(y);
-      if (close && y === nowY) {
-        actualTd = '<td class="yt-prog" title="year in progress">' + esc(fmtUSD(close[1])) + " ·</td>";
-      } else if (close) {
-        actualTd = "<td>" + esc(fmtUSD(close[1])) + "</td>";
+      var actualPrice = close ? close[1] : null;   // price used for tinting (both modes)
+      var scale = mode ? holdingsForYear(y, h) : 1;
+      // Leading columns: Year, then either (BTC input + Actual value) or (Actual close).
+      var lead;
+      if (mode) {
+        var override = h.perYear[String(y)];
+        var hasOv = typeof override === "number" && isFinite(override);
+        var btcCell = '<td class="yt-btc-cell"><input class="yt-btc-input" type="number" min="0" max="21000000" step="any" inputmode="decimal" data-year="' + y +
+          '" value="' + (hasOv ? esc(fmtBtc(override)) : "") + '" placeholder="' + esc(h.globalBtc ? fmtBtc(h.globalBtc) : "0") +
+          '" aria-label="BTC held at end of ' + y + '"></td>';
+        var avCell;
+        if (close && y === nowY) avCell = '<td class="yt-prog" title="year in progress">' + esc(fmtUSD(actualPrice * scale)) + " ·</td>";
+        else if (close) avCell = "<td>" + esc(fmtUSD(actualPrice * scale)) + "</td>";
+        else avCell = "<td>—</td>";
+        lead = "<td>" + y + "</td>" + btcCell + avCell;
       } else {
-        actualTd = "<td>—</td>";
+        var actualTd;
+        if (close && y === nowY) actualTd = '<td class="yt-prog" title="year in progress">' + esc(fmtUSD(actualPrice)) + " ·</td>";
+        else if (close) actualTd = "<td>" + esc(fmtUSD(actualPrice)) + "</td>";
+        else actualTd = "<td>—</td>";
+        lead = "<td>" + y + "</td>" + actualTd;
       }
-      // Model columns (fixed default percentile set, independent of legend state)
-      var cells;
-      if (m && m.a != null && m.n != null) {
-        cells =
-          "<td>" + esc(modelCell(m, dec31, offs.p025)) + "</td>" +
-          "<td>" + esc(modelCell(m, dec31, offs.p165)) + "</td>" +
-          "<td>" + esc(fmtUSD(modelUsdAt(m, dec31, 0))) + "</td>" +
-          "<td>" + esc(modelCell(m, dec31, offs.p835)) + "</td>" +
-          "<td>" + esc(modelCell(m, dec31, offs.p975)) + "</td>";
-      } else {
-        cells = "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
-      }
+      var cells = modelCells(m, dec31, offs, actualPrice, scale);
       var beyond = y > caution;
       if (beyond) anyBeyond = true;
       var rowCls = "yt-row" + (y === nowY ? " yt-now" : "") + (beyond ? " yt-beyond" : "");
-      html += '<tr class="' + rowCls + '">' +
-        "<td>" + y + "</td>" +
-        actualTd +
-        cells +
-        "</tr>";
+      html += '<tr class="' + rowCls + '">' + lead + cells + "</tr>";
     }
     body.innerHTML = html;
     show("yearTableFoot", anyBeyond);
+    if (mode) wireHoldingsRowInputs();
   }
-  function modelCell(m, ms, off) {
-    if (typeof off !== "number" || !isFinite(off)) return "—";
-    return fmtUSD(modelUsdAt(m, ms, off));
+
+  // Wire the per-row BTC inputs (rebuilt on every render). Blur or Enter commits the
+  // per-year override; empty clears it back to the global amount. Each commit PUTs the
+  // whole holdings object.
+  function wireHoldingsRowInputs() {
+    var body = $("yearTableRows");
+    if (!body) return;
+    var inputs = body.querySelectorAll(".yt-btc-input");
+    for (var i = 0; i < inputs.length; i++) {
+      (function (inp) {
+        inp.addEventListener("blur", function () { commitPerYear(inp); });
+        inp.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter" || ev.keyCode === 13) { ev.preventDefault(); inp.blur(); }
+        });
+      })(inputs[i]);
+    }
+  }
+  async function commitPerYear(inp) {
+    var year = inp.getAttribute("data-year");
+    var raw = String(inp.value == null ? "" : inp.value).trim();
+    var h = currentHoldings();
+    var prev = h.perYear[year];
+    var hadPrev = typeof prev === "number" && isFinite(prev);
+    var next = holdingsClone(h);
+    if (raw === "") {
+      if (!hadPrev) { renderYearTable(); return; }
+      delete next.perYear[year];
+    } else {
+      var v = Number(raw);
+      if (!isFinite(v) || v < 0) { toast("Enter a valid BTC amount", "error"); renderYearTable(); return; }
+      if (hadPrev && prev === v) { renderYearTable(); return; }
+      next.perYear[year] = v;
+    }
+    await putHoldings(next);
+  }
+
+  // Mode toggle + global-BTC control wiring (called once at boot).
+  function wireHoldingsMode() {
+    var pe = $("ytMode_price"), he = $("ytMode_holdings");
+    if (pe) pe.addEventListener("click", function () { setHoldingsEnabled(false); });
+    if (he) he.addEventListener("click", function () { setHoldingsEnabled(true); });
+    var gi = $("ytGlobalBtc");
+    if (gi) {
+      gi.addEventListener("blur", function () { commitGlobalBtc(gi); });
+      gi.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.keyCode === 13) { ev.preventDefault(); gi.blur(); } });
+    }
+  }
+  async function setHoldingsEnabled(on) {
+    var h = currentHoldings();
+    if (h.enabled === on) return;
+    var next = holdingsClone(h);
+    next.enabled = on;
+    await putHoldings(next);
+  }
+  async function commitGlobalBtc(gi) {
+    var raw = String(gi.value == null ? "" : gi.value).trim();
+    var h = currentHoldings();
+    var v = raw === "" ? 0 : Number(raw);
+    if (!isFinite(v) || v < 0) { toast("Enter a valid BTC amount", "error"); renderYearTable(); return; }
+    if (v === h.globalBtc) { renderYearTable(); return; }
+    var next = holdingsClone(h);
+    next.globalBtc = v;
+    await putHoldings(next);
   }
 
   function renderMilestones(ms) {
@@ -974,6 +1121,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   // Year-end table collapsible (v0.1.2): mirrors the settings drawer toggle;
   // expanded by default (the body starts visible in the page shell).
   function wireYearTable() {
+    wireHoldingsMode();
     var toggle = $("yearTableToggle");
     if (!toggle) return;
     toggle.addEventListener("click", function () {
@@ -1012,7 +1160,11 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
       "Point-in-time (the default, and porkopolis's current method): each day is compared against the trend as it was fitted using only the data available up to that day - what the model would actually have said at the time, with no hindsight. The extreme percentiles, especially the upper ones, come out tighter.",
       "Practical effect on the projections: full-sample paints a wider funnel around the trend (more optimistic ceilings, more pessimistic floors); point-in-time paints a narrower, more conservative funnel. Neither is a prediction - the bands describe how far price has historically wandered from trend, nothing more."
     ],
-    yearEndTable: "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",
+    yearEndTable: [
+      "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",
+      "My holdings mode: enter how much BTC you expect to hold at the end of each year - one amount for every year, or per-year amounts if you plan to keep accumulating. The table then multiplies your holdings by each line's price for that year; past years use the actual closing price. The amounts are stored only on your Umbrel, behind its login. This is a what-if illustration, not financial advice.",
+      "For years with an actual close, model values are tinted green when that line sat at or above the actual price, red when it sat below - a quick read of which lines contained reality. It is not a judgment of good or bad."
+    ],
     sourceMode: "Auto uses every working source with built-in cross-checks and quorum rules - recommended. Manual lets you choose sources yourself; you must keep a valid history source (blockchain.info, or Bitstamp + Binance together) and at least two spot sources.",
     enabledSources: [
       "blockchainInfo: primary daily history since 2010 (multi-exchange average)",

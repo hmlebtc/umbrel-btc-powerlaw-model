@@ -178,3 +178,186 @@ test('SettingsStore.update: rejects invalid, applies valid', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Holdings (spec section 13.2) — personal year-end-table what-if amounts.
+// Same dual-path shape as every other field: a structural problem is reported
+// (so PUT 400s) AND reverts the WHOLE holdings object to its default (so the
+// load/seed/init path falls back).
+// ---------------------------------------------------------------------------
+
+/** Build a Settings whose holdings is `h` verbatim (bypassing the TS shape so
+ *  the validator's own range/key checks are what we exercise). */
+function withHoldings(h: unknown): Settings {
+  return { ...defaultSettings(), holdings: h as Settings['holdings'] };
+}
+
+test('validateSettings: defaults ship holdings empty + disabled', () => {
+  assert.deepEqual(defaultSettings().holdings, { enabled: false, globalBtc: 0, perYear: {} });
+});
+
+test('validateSettings: a valid holdings object passes unchanged', () => {
+  const holdings = { enabled: true, globalBtc: 2.5, perYear: { '2025': 0.125, '2030': 21_000_000 } };
+  const { errors, resetFields, settings } = validateSettings(withHoldings(holdings));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(resetFields, []);
+  assert.deepEqual(settings.holdings, holdings);
+});
+
+test('validateSettings: enabled is coerced to a real boolean', () => {
+  const { settings } = validateSettings(withHoldings({ enabled: 1, globalBtc: 0, perYear: {} }));
+  assert.equal(settings.holdings.enabled, true);
+});
+
+test('validateSettings: negative or >21M globalBtc reverts the whole holdings field', () => {
+  for (const bad of [-1, 21_000_001, Number.NaN, Infinity, '5']) {
+    const { errors, resetFields, settings } = validateSettings(
+      withHoldings({ enabled: true, globalBtc: bad, perYear: { '2025': 1 } }),
+    );
+    assert.ok(errors.some((e) => e.includes('globalBtc')), `bad=${String(bad)}`);
+    assert.ok(resetFields.includes('holdings'));
+    assert.deepEqual(settings.holdings, defaultSettings().holdings);
+  }
+});
+
+test('validateSettings: a negative or >21M perYear amount reverts holdings', () => {
+  for (const bad of [-0.5, 21_000_001, '2']) {
+    const { errors, resetFields, settings } = validateSettings(
+      withHoldings({ enabled: true, globalBtc: 0, perYear: { '2025': bad } }),
+    );
+    assert.ok(errors.some((e) => e.includes('perYear')), `bad=${String(bad)}`);
+    assert.ok(resetFields.includes('holdings'));
+    assert.deepEqual(settings.holdings, defaultSettings().holdings);
+  }
+});
+
+test('validateSettings: bad perYear year keys revert holdings', () => {
+  for (const badKey of ['abc', '99', '2008', '2061', '20255']) {
+    const { errors, resetFields, settings } = validateSettings(
+      withHoldings({ enabled: false, globalBtc: 0, perYear: { [badKey]: 1 } }),
+    );
+    assert.ok(errors.some((e) => e.includes('year key')), `badKey=${badKey}`);
+    assert.ok(resetFields.includes('holdings'));
+    assert.deepEqual(settings.holdings, defaultSettings().holdings);
+  }
+});
+
+test('validateSettings: the 2009..2060 year-key boundaries are accepted', () => {
+  const holdings = { enabled: true, globalBtc: 0, perYear: { '2009': 1, '2060': 2 } };
+  const { errors, resetFields } = validateSettings(withHoldings(holdings));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(resetFields, []);
+});
+
+test('validateSettings: more than 60 perYear entries reverts holdings', () => {
+  // The 2009..2060 window only admits 52 keys, so 61 entries necessarily spill
+  // outside it — but the >60 count check runs before the per-key loop and fires
+  // its own distinct 'exceed' error, which is what we assert here.
+  const many: Record<string, number> = {};
+  for (let y = 2001; y <= 2061; y++) many[String(y)] = 1; // 61 entries
+  assert.equal(Object.keys(many).length, 61);
+  const { errors, resetFields, settings } = validateSettings(
+    withHoldings({ enabled: false, globalBtc: 0, perYear: many }),
+  );
+  assert.ok(errors.some((e) => e.includes('exceed')));
+  assert.ok(resetFields.includes('holdings'));
+  assert.deepEqual(settings.holdings, defaultSettings().holdings);
+});
+
+test('validateSettings: a non-object holdings (or perYear) reverts to default', () => {
+  for (const garbage of ['nope', 42, [], null]) {
+    const { errors, resetFields, settings } = validateSettings(withHoldings(garbage));
+    assert.ok(errors.some((e) => e.includes('holdings')), `garbage=${JSON.stringify(garbage)}`);
+    assert.ok(resetFields.includes('holdings'));
+    assert.deepEqual(settings.holdings, defaultSettings().holdings);
+  }
+  const badPerYear = validateSettings(withHoldings({ enabled: true, globalBtc: 0, perYear: 'x' }));
+  assert.ok(badPerYear.errors.some((e) => e.includes('perYear')));
+  assert.ok(badPerYear.resetFields.includes('holdings'));
+  assert.deepEqual(badPerYear.settings.holdings, defaultSettings().holdings);
+});
+
+test('SettingsStore.update: a valid holdings patch round-trips (enable, globalBtc, perYear)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const store = new SettingsStore(dir, defaultSettings());
+    const res = store.update({ holdings: { enabled: true, globalBtc: 1.25, perYear: { '2025': 0.5 } } });
+    assert.equal(res.ok, true);
+    assert.deepEqual(store.get().holdings, { enabled: true, globalBtc: 1.25, perYear: { '2025': 0.5 } });
+    // Reloading from disk yields the same persisted holdings.
+    assert.deepEqual(loadSettings(dir).holdings, { enabled: true, globalBtc: 1.25, perYear: { '2025': 0.5 } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('SettingsStore.update: PUT replaces perYear wholesale (not a deep-merge union)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const store = new SettingsStore(dir, defaultSettings());
+    assert.equal(store.update({ holdings: { enabled: true, globalBtc: 0, perYear: { '2024': 1, '2025': 2 } } }).ok, true);
+    // A second PUT carrying a different perYear must REPLACE, never union.
+    assert.equal(store.update({ holdings: { perYear: { '2030': 3 } } as unknown as Settings['holdings'] }).ok, true);
+    assert.deepEqual(store.get().holdings.perYear, { '2030': 3 });
+    // Untouched sibling fields survive the perYear-only patch.
+    assert.equal(store.get().holdings.enabled, true);
+    // Clearing perYear entirely is possible via an empty object.
+    assert.equal(store.update({ holdings: { perYear: {} } as unknown as Settings['holdings'] }).ok, true);
+    assert.deepEqual(store.get().holdings.perYear, {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('SettingsStore.update: invalid holdings is rejected, leaving current unchanged', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const store = new SettingsStore(dir, defaultSettings());
+    assert.equal(store.update({ holdings: { enabled: true, globalBtc: 3, perYear: { '2025': 1 } } }).ok, true);
+    const bad = store.update({ holdings: { globalBtc: -5 } as unknown as Settings['holdings'] });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) assert.ok(bad.errors.some((e) => e.includes('globalBtc')));
+    // No partial application: the last good holdings survives verbatim.
+    assert.deepEqual(store.get().holdings, { enabled: true, globalBtc: 3, perYear: { '2025': 1 } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadSettings: a legacy settings.json without holdings loads with holdings defaults', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    // A file written before v0.1.3: every documented field EXCEPT holdings.
+    const legacy = {
+      refitIntervalHours: 24,
+      spotPollMinutes: 10,
+      projectionEndYear: 2050,
+      bandMode: 'fullSample',
+      sourceMode: 'auto',
+      enabledSources: defaultSettings().enabledSources,
+    };
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(legacy), 'utf8');
+    const loaded = loadSettings(dir);
+    // The deep-merge-onto-defaults path supplies the whole holdings object.
+    assert.deepEqual(loaded.holdings, defaultSettings().holdings);
+    // Other legacy fields are preserved (holdings is a pure addition).
+    assert.equal(loaded.refitIntervalHours, 24);
+    assert.equal(loaded.projectionEndYear, 2050);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadSettings: a hostile persisted holdings is reverted on load', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    writeFileSync(
+      join(dir, 'settings.json'),
+      JSON.stringify({ ...defaultSettings(), holdings: { enabled: true, globalBtc: -9, perYear: { bad: 1 } } }),
+      'utf8',
+    );
+    assert.deepEqual(loadSettings(dir).holdings, defaultSettings().holdings);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

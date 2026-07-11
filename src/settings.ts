@@ -37,6 +37,12 @@ export function defaultSettings(): Settings {
       mempoolSpace: true,
       coingecko: true,
     },
+    // Personal what-if amounts (spec 13.2); empty + off on a fresh install.
+    holdings: {
+      enabled: false,
+      globalBtc: 0,
+      perYear: {},
+    },
   };
 }
 
@@ -79,6 +85,20 @@ function clone<T>(v: T): T {
 function isIntInRange(v: unknown, min: number, max: number): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
 }
+
+/** Finite real number in an inclusive range (BTC amounts are fractional). */
+function isNumInRange(v: unknown, min: number, max: number): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+}
+
+// Holdings bounds (spec section 13.2). BTC amounts are fractional (up to 8 dp)
+// and capped at the 21M supply; perYear is keyed by 4-digit years 2009..2060,
+// at most 60 entries.
+const HOLDINGS_MAX_BTC = 21_000_000;
+const HOLDINGS_MAX_YEARS = 60;
+const HOLDINGS_YEAR_MIN = 2009;
+const HOLDINGS_YEAR_MAX = 2060;
+const YEAR_KEY_RE = /^\d{4}$/;
 
 export interface ValidationResult {
   errors: string[];
@@ -149,6 +169,54 @@ export function validateSettings(input: Settings): ValidationResult {
     }
   }
 
+  // Holdings (spec 13.2) — same dual-path shape as every other field: any
+  // structural problem is BOTH reported (so PUT 400s) AND reverts the WHOLE
+  // holdings object to its default (so the load/seed/init path falls back and
+  // logs). Follows the folders-array pattern: `enabled` coerced to a boolean;
+  // globalBtc and each perYear value must be finite numbers in [0, 21,000,000];
+  // perYear keys must be 4-digit years in [2009, 2060] with at most 60 entries.
+  const rawH = (c as unknown as Record<string, unknown>).holdings;
+  if (!isPlainObject(rawH)) {
+    reset('holdings', 'holdings must be an object');
+  } else {
+    let bad = false;
+    if (!isNumInRange(rawH.globalBtc, 0, HOLDINGS_MAX_BTC)) {
+      errors.push(`holdings.globalBtc must be a number between 0 and ${HOLDINGS_MAX_BTC}`);
+      bad = true;
+    }
+    const cleanPerYear: Record<string, number> = {};
+    if (!isPlainObject(rawH.perYear)) {
+      errors.push('holdings.perYear must be an object');
+      bad = true;
+    } else {
+      const entries = Object.entries(rawH.perYear);
+      if (entries.length > HOLDINGS_MAX_YEARS) {
+        errors.push(`holdings.perYear cannot exceed ${HOLDINGS_MAX_YEARS} entries`);
+        bad = true;
+      }
+      for (const [year, amount] of entries) {
+        const yr = Number(year);
+        if (!YEAR_KEY_RE.test(year) || yr < HOLDINGS_YEAR_MIN || yr > HOLDINGS_YEAR_MAX) {
+          errors.push(`holdings.perYear has an invalid year key: ${JSON.stringify(year)}`);
+          bad = true;
+          continue;
+        }
+        if (!isNumInRange(amount, 0, HOLDINGS_MAX_BTC)) {
+          errors.push(`holdings.perYear[${year}] must be a number between 0 and ${HOLDINGS_MAX_BTC}`);
+          bad = true;
+          continue;
+        }
+        cleanPerYear[year] = amount;
+      }
+    }
+    if (bad) {
+      if (!resetFields.includes('holdings')) resetFields.push('holdings');
+      c.holdings = clone(def.holdings);
+    } else {
+      c.holdings = { enabled: Boolean(rawH.enabled), globalBtc: rawH.globalBtc as number, perYear: cleanPerYear };
+    }
+  }
+
   return { errors, resetFields, settings: c };
 }
 
@@ -189,6 +257,12 @@ export function seedSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): Setti
   if (endYear !== undefined) c.projectionEndYear = endYear;
   if (env.BPL_BAND_MODE) c.bandMode = env.BPL_BAND_MODE as BandMode;
   if (env.BPL_SOURCE_MODE) c.sourceMode = env.BPL_SOURCE_MODE as SourceMode;
+
+  // NOTE (spec 13.2): `holdings` is deliberately NOT seeded from any BPL_* env
+  // var. It is personal, dashboard-entered data (how much BTC the user holds),
+  // not an operator tuning knob, so there is no compose default to propagate and
+  // no reason to let an environment value pre-populate someone's private figures.
+  // It always starts at the defaultSettings() empty/disabled state on first boot.
 
   // Normalise + fall back per field so a bad env value can't persist an invalid
   // configuration on first boot.
@@ -248,6 +322,14 @@ export class SettingsStore {
 
   update(patch: Partial<Settings>): { ok: true } | { ok: false; errors: string[] } {
     const merged = deepMerge(this.current, patch);
+    // Spec 13.2: a PUT REPLACES the whole holdings.perYear map. deepMerge would
+    // otherwise union it with the entries already on disk (both are plain
+    // objects), so when the patch supplies holdings.perYear it wins wholesale
+    // (validateSettings still normalises / can revert it).
+    const patchHoldings = (patch as { holdings?: unknown }).holdings;
+    if (isPlainObject(patchHoldings) && 'perYear' in patchHoldings) {
+      (merged as Settings).holdings.perYear = clone(patchHoldings.perYear) as Record<string, number>;
+    }
     const { errors, settings } = validateSettings(merged);
     if (errors.length > 0) return { ok: false, errors };
     this.current = settings;

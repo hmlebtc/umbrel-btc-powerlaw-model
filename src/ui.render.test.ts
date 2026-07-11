@@ -127,12 +127,16 @@ interface CanvasStub {
   height: number;
   style: Record<string, string>;
   getContext(type: string): CanvasRenderingContext2DLike;
-  addEventListener(...a: unknown[]): void;
+  addEventListener(type: string, handler: (ev: unknown) => void, opts?: unknown): void;
   removeEventListener(...a: unknown[]): void;
   getBoundingClientRect(): { left: number; top: number; width: number; height: number };
+  // name -> handler, recorded so interaction tests can replay the REAL handlers
+  // the engine wired up (mousedown/mousemove/touch*/...) with synthetic events.
+  listeners: Record<string, (ev: unknown) => void>;
 }
 
 function makeCanvas(w: number, h: number, ctx: CanvasRenderingContext2DLike): CanvasStub {
+  const listeners: Record<string, (ev: unknown) => void> = {};
   return {
     clientWidth: w,
     clientHeight: h,
@@ -140,9 +144,12 @@ function makeCanvas(w: number, h: number, ctx: CanvasRenderingContext2DLike): Ca
     height: 0,
     style: {},
     getContext: () => ctx,
-    addEventListener: () => {},
+    addEventListener: (type: string, handler: (ev: unknown) => void): void => {
+      listeners[type] = handler;
+    },
     removeEventListener: () => {},
     getBoundingClientRect: () => ({ left: 0, top: 0, width: w, height: h }),
+    listeners,
   };
 }
 
@@ -419,4 +426,252 @@ test("4-key (legacy) offsets draw exactly four band lines and never throw", () =
   );
   assert.ok(!strokeColors.has("#26A69A"), "25%/75% teal drew despite missing p25/p75 keys");
   assert.ok(!strokeColors.has("#9E9E9E"), "median gray drew despite missing p50 key");
+});
+
+// ===========================================================================
+//  INTERACTION HARNESS  (drag-to-pan / range-zoom / touch)  — v0.1.3-pre
+// ===========================================================================
+// The paint tests above prove draw() runs under the synchronous-rAF stub, which
+// is the ONLY place chart geometry G is initialised. The pan/zoom/touch handlers
+// no-op until G exists (they all read G.ml/G.mw/...), so a hidden browser that
+// parks requestAnimationFrame can never exercise them — but this harness can.
+//
+// We reuse the same recording context + canvas stub, but now ALSO record every
+// addEventListener the engine makes: on the CANVAS (mousedown/mousemove/touch*)
+// AND on WINDOW (mouseup binds to window, so a pan can never finalise without it).
+// Tests then replay the REAL handlers with synthetic event objects and assert on
+// DRAWN OUTPUT only — the x-axis year labels the engine paints below the plot.
+// No private state is read (no eval into the IIFE); no drawing is faked.
+
+interface PLChartApi {
+  mount(o: unknown): void;
+  setModel(m: unknown): void;
+  setPrices(p: unknown): void;
+  setPrefs(p: unknown): void;
+  setPreset(n: string): void;
+  redraw(): void;
+}
+
+interface Interactive {
+  chart: PLChartApi;
+  mainCtx: RecordingCtx;
+  mainCanvas: CanvasStub;
+  canvasL: Record<string, (ev: unknown) => void>; // canvas-bound handlers
+  windowL: Record<string, (ev: unknown) => void>; // window-bound handlers (mouseup)
+  cleared: { count: number }; // onPresetCleared invocation counter
+}
+
+// Plot rectangle the engine derives for a 900x460 wrap (mL62/mR14/mT14/mB34):
+// x in [62, 886], y in [14, 426]. These are the same constants layout() computes.
+const PLOT = { left: 62, right: WRAP_W - 14, top: 14, bottom: WRAP_H - 34 };
+const CX = (PLOT.left + PLOT.right) / 2; // 474 — plot-centre x
+const CY = (PLOT.top + PLOT.bottom) / 2; // 220 — plot-centre y
+
+// Mount the real engine against recording stubs, feed the fixture model+prices,
+// and let it paint once (synchronous rAF) so geometry G is live before any gesture.
+function mountInteractive(): Interactive {
+  const mainCtx = makeRecordingCtx();
+  const oscCtx = makeRecordingCtx();
+  const mainCanvas = makeCanvas(WRAP_W, WRAP_H, mainCtx.proxy);
+  const oscCanvas = makeCanvas(OSC_W, OSC_H, oscCtx.proxy);
+  const wrap = { clientWidth: WRAP_W, clientHeight: WRAP_H };
+  const oscWrap = { clientWidth: OSC_W, clientHeight: OSC_H, offsetParent: {} };
+  const tip = { style: {} as Record<string, string>, innerHTML: "", offsetWidth: 0, offsetHeight: 0 };
+
+  const windowL: Record<string, (ev: unknown) => void> = {};
+  const windowStub: Record<string, unknown> = {
+    devicePixelRatio: DPR,
+    requestAnimationFrame: (cb: () => void): number => { cb(); return 1; },
+    addEventListener: (type: string, h: (ev: unknown) => void): void => { windowL[type] = h; },
+    removeEventListener: (): void => {},
+  };
+
+  const factory = new Function("window", "ResizeObserver", CHART_JS) as unknown as (
+    w: unknown,
+    ro: unknown,
+  ) => void;
+  factory(windowStub, undefined);
+  const chart = windowStub["PLChart"] as PLChartApi;
+  assert.ok(chart, "CHART_JS did not install window.PLChart");
+
+  const cleared = { count: 0 };
+  chart.mount({
+    canvas: mainCanvas,
+    osc: oscCanvas,
+    tip,
+    wrap,
+    oscWrap,
+    onPresetCleared: () => { cleared.count++; },
+  });
+  chart.setModel(MODEL_PAYLOAD);
+  chart.setPrices(PRICE_PAYLOAD);
+
+  return { chart, mainCtx, mainCanvas, canvasL: mainCanvas.listeners, windowL, cleared };
+}
+
+// Invoke a recorded handler by name with a synthetic event.
+function fire(map: Record<string, (ev: unknown) => void>, type: string, ev: unknown): void {
+  const h = map[type];
+  assert.ok(h, "no handler registered for '" + type + "'");
+  h(ev);
+}
+function mouseEv(x: number, y: number, shift?: boolean): Record<string, unknown> {
+  return { clientX: x, clientY: y, shiftKey: !!shift, button: 0, buttons: 1, preventDefault(): void {} };
+}
+function touch1Ev(x: number, y: number): Record<string, unknown> {
+  return { touches: [{ clientX: x, clientY: y }], preventDefault(): void {} };
+}
+
+// A mouse drag (x0,y)->(x1,y): shift => range-zoom rectangle, else pan. mouseup
+// is dispatched on WINDOW, matching how the engine bound it.
+function mouseDrag(h: Interactive, x0: number, x1: number, y: number, shift: boolean): void {
+  fire(h.canvasL, "mousedown", mouseEv(x0, y, shift));
+  fire(h.canvasL, "mousemove", mouseEv(x1, y, shift));
+  fire(h.windowL, "mouseup", {});
+}
+
+// Establish a deterministic ~10.3-year sub-window (yearly ticks) by range-zooming
+// x=280..520 out of the full 2010..2045 domain. A pan from the FULL view is
+// edge-clamped to a no-op (it already spans the whole domain), so tests that must
+// observe a real shift zoom in first to leave room on both sides.
+function zoomToSubView(h: Interactive): void {
+  mouseDrag(h, 280, 520, CY, true);
+}
+
+// The x-axis tick labels are the only fillText strings the engine paints BELOW
+// the plot (y-labels sit left/inside the plot; today/caution/halving text sits at
+// or above the top). So a y-arg past the plot bottom isolates the x-axis labels.
+function xLabels(ctx: RecordingCtx): string[] {
+  const out: string[] = [];
+  for (const c of ctx.calls) {
+    if (c.m !== "fillText") continue;
+    const s = c.args[0];
+    const yy = c.args[2];
+    if (typeof s === "string" && typeof yy === "number" && yy > PLOT.bottom) out.push(s);
+  }
+  return out;
+}
+// In date mode a whole-year tick is painted as a bare 4-digit string ("2024");
+// month ticks ("Jan 24") and log-day ticks ("123 d") never match, so this yields
+// exactly the visible whole years, which are what shift under a pan/zoom.
+function yearsFrom(labels: string[]): number[] {
+  const out: number[] = [];
+  for (const l of labels) if (/^\d{4}$/.test(l)) out.push(parseInt(l, 10));
+  return out;
+}
+// Force one clean frame and read back its x-axis year labels.
+function frameYears(h: Interactive): number[] {
+  h.mainCtx.reset();
+  h.chart.redraw();
+  return yearsFrom(xLabels(h.mainCtx));
+}
+
+// (a) PAN: a +120px centre drag shifts the window toward earlier dates ----------
+test("drag-pan shifts the drawn x-axis labels toward earlier dates", () => {
+  const h = mountInteractive();
+  zoomToSubView(h);
+  h.cleared.count = 0;
+  const before = frameYears(h);
+  assert.ok(before.length >= 3, "sub-view drew too few year labels: " + before.join(","));
+
+  mouseDrag(h, CX, CX + 120, CY, false);
+
+  const after = frameYears(h);
+  assert.ok(after.length >= 3, "post-pan drew too few year labels: " + after.join(","));
+  assert.ok(
+    Math.min(...after) < Math.min(...before),
+    "pan did not move the labels earlier (before " + before.join(",") + " / after " + after.join(",") + ")",
+  );
+  assert.notEqual(JSON.stringify(after), JSON.stringify(before), "pan left the label set unchanged");
+});
+
+// (b) MICRO-DRAG: a 2px twitch is a click, not a pan — nothing moves, no clear ---
+test("a 2px micro-drag neither pans the view nor clears the preset", () => {
+  const h = mountInteractive();
+  zoomToSubView(h);
+  h.cleared.count = 0;
+  const before = frameYears(h);
+
+  mouseDrag(h, CX, CX + 2, CY, false);
+
+  const after = frameYears(h);
+  assert.equal(JSON.stringify(after), JSON.stringify(before), "a 2px twitch moved the drawn labels");
+  assert.equal(h.cleared.count, 0, "a 2px twitch cleared the preset");
+});
+
+// (c) A committed pan clears the active preset EXACTLY once (not once per move) --
+test("a drag-pan calls onPresetCleared exactly once", () => {
+  const h = mountInteractive();
+  zoomToSubView(h);
+  h.cleared.count = 0;
+
+  fire(h.canvasL, "mousedown", mouseEv(CX, CY, false));
+  fire(h.canvasL, "mousemove", mouseEv(CX + 60, CY, false));
+  fire(h.canvasL, "mousemove", mouseEv(CX + 120, CY, false)); // 2nd move must NOT re-clear
+  fire(h.windowL, "mouseup", {});
+
+  assert.equal(h.cleared.count, 1, "expected exactly one preset-clear, got " + h.cleared.count);
+});
+
+// (d) SHIFT+DRAG ZOOM: a shift range-select narrows the visible date span -------
+test("shift-drag range-zoom narrows the drawn date range and clears the preset", () => {
+  const h = mountInteractive();
+  const before = frameYears(h); // full 2010..2045 domain
+  assert.ok(before.length >= 3, "full view drew too few year labels: " + before.join(","));
+  h.cleared.count = 0;
+
+  mouseDrag(h, 300, 600, CY, true); // 300px range-select, well over the 50px floor
+
+  const after = frameYears(h);
+  assert.ok(after.length >= 2, "zoomed view drew too few year labels: " + after.join(","));
+  const spanBefore = Math.max(...before) - Math.min(...before);
+  const spanAfter = Math.max(...after) - Math.min(...after);
+  assert.ok(
+    spanAfter < spanBefore,
+    "range-zoom did not narrow the span (" + spanBefore + "yr -> " + spanAfter + "yr)",
+  );
+  assert.equal(h.cleared.count, 1, "range-zoom should clear the preset once, got " + h.cleared.count);
+});
+
+// (e) CLAMP: panning far past the data start never draws a year before 2010 -----
+test("panning far left clamps at the data start (no year label before 2010)", () => {
+  const h = mountInteractive();
+  zoomToSubView(h);
+
+  mouseDrag(h, CX, CX + 5000, CY, false); // huge rightward drag reveals earlier dates
+
+  const years = frameYears(h);
+  assert.ok(years.length >= 3, "clamped view drew too few year labels: " + years.join(","));
+  assert.ok(
+    Math.min(...years) >= 2010,
+    "a year label preceded the 2010 data start: " + years.join(","),
+  );
+});
+
+// (f) TOUCH: a single-finger drag pans; a two-finger touch is ignored -----------
+test("single-finger touch drag pans; a two-finger touch does not", () => {
+  const h = mountInteractive();
+  zoomToSubView(h);
+  const before = frameYears(h);
+
+  fire(h.canvasL, "touchstart", touch1Ev(CX, CY));
+  fire(h.canvasL, "touchmove", touch1Ev(CX + 80, CY));
+  fire(h.canvasL, "touchend", { preventDefault(): void {} });
+
+  const afterPan = frameYears(h);
+  assert.ok(
+    Math.min(...afterPan) < Math.min(...before),
+    "single-finger touch did not pan earlier (before " + before.join(",") + " / after " + afterPan.join(",") + ")",
+  );
+
+  // Two fingers must be ignored entirely (pinch is out of scope this round).
+  const baseline = frameYears(h);
+  const two = { touches: [{ clientX: CX, clientY: CY }, { clientX: CX + 40, clientY: CY }], preventDefault(): void {} };
+  const twoMoved = { touches: [{ clientX: CX + 80, clientY: CY }, { clientX: CX + 120, clientY: CY }], preventDefault(): void {} };
+  fire(h.canvasL, "touchstart", two);
+  fire(h.canvasL, "touchmove", twoMoved);
+  fire(h.canvasL, "touchend", { preventDefault(): void {} });
+
+  const afterMulti = frameYears(h);
+  assert.equal(JSON.stringify(afterMulti), JSON.stringify(baseline), "a two-finger touch moved the view");
 });

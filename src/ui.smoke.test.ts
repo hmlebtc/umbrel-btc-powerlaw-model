@@ -110,6 +110,59 @@ test("dashboard has the per-percentile legend with a More-bands expander", () =>
   }
 });
 
+test("chart explainer swaps in the v0.1.3 pan interaction sentence", () => {
+  // the new verbatim interaction sentence (spec 13.1) is present...
+  assert.ok(
+    DASHBOARD_HTML.includes(
+      "Drag to move around the chart, hold Shift and drag to select a range to zoom into, scroll to zoom at the cursor, and double-click to reset the view.",
+    ),
+    "new v0.1.3 pan interaction sentence missing",
+  );
+  // ...and the old v0.1.2 sentence is gone (its distinctive opening no longer appears)
+  assert.ok(
+    !DASHBOARD_HTML.includes("Drag to zoom, scroll to zoom at the cursor, double-click to reset."),
+    "old interaction sentence still present",
+  );
+  assert.ok(!DASHBOARD_HTML.includes("Drag to zoom,"), "stale 'Drag to zoom,' fragment still present");
+});
+
+test("year-end table exposes the Price | My-holdings mode toggle and BTC column", () => {
+  // the segmented mode toggle (spec 13.2) lives on the table card, not the settings drawer
+  assert.ok(DASHBOARD_HTML.includes('id="ytMode_price"'), "Price mode segment missing");
+  assert.ok(DASHBOARD_HTML.includes('id="ytMode_holdings"'), "My-holdings mode segment missing");
+  assert.ok(DASHBOARD_HTML.includes(">My holdings<"), "My holdings segment label missing");
+  // the global BTC input control
+  assert.ok(DASHBOARD_HTML.includes('id="ytGlobalBtc"'), "global BTC input missing");
+  assert.ok(DASHBOARD_HTML.includes("applies to all years"), "global BTC helper copy missing");
+  // the holdings-mode header columns: BTC + Actual value (spec 13.2 header row)
+  assert.ok(DASHBOARD_HTML.includes(">BTC</th>"), "holdings BTC column header missing");
+  assert.ok(DASHBOARD_HTML.includes(">Actual value</th>"), "holdings Actual value column header missing");
+  // the per-row editable BTC input class the app renders into each row
+  assert.ok(DASHBOARD_HTML.includes("yt-btc-input"), "per-row BTC input class missing");
+});
+
+test("year-end table carries the red/green tint classes (spec 13.3)", () => {
+  // tint class rules (green >= actual, red below) present in the page CSS + app markup
+  assert.ok(DASHBOARD_HTML.includes("yt-hi"), "green tint class yt-hi missing");
+  assert.ok(DASHBOARD_HTML.includes("yt-lo"), "red tint class yt-lo missing");
+  // the spec-mandated tint hues
+  assert.ok(DASHBOARD_HTML.includes("#42A04C"), "green tint colour missing");
+  assert.ok(DASHBOARD_HTML.includes("#EF5350"), "red tint colour missing");
+});
+
+test("year-end table help gains the holdings + tinting verbatim paragraphs", () => {
+  assert.ok(
+    DASHBOARD_HTML.includes(
+      "The amounts are stored only on your Umbrel, behind its login. This is a what-if illustration, not financial advice.",
+    ),
+    "holdings help paragraph missing",
+  );
+  assert.ok(
+    DASHBOARD_HTML.includes("a quick read of which lines contained reality"),
+    "tinting help sentence missing",
+  );
+});
+
 test("dashboard has the year-end model table (title, columns, footnote, info)", () => {
   assert.ok(DASHBOARD_HTML.includes('id="yearTableCard"'), "year-end table card missing");
   assert.ok(DASHBOARD_HTML.includes('id="yearTableRows"'), "year-end table body missing");

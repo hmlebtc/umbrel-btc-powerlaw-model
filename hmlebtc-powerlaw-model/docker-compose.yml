@@ -16,6 +16,13 @@
 # the daemon reads whatever is saved in settings.json (dashboard edits
 # or PUT /api/settings win), so an app update or container recreation
 # never clobbers a live configuration change.
+#
+# One field is deliberately NOT seeded from env: `holdings` (the year-end
+# table's optional "My holdings" BTC amounts). It's personal data the user
+# types into the dashboard, not deployment configuration, so it has no
+# BPL_* variable here - it only ever exists in settings.json on this
+# container's own /data volume, behind Umbrel's login, and is never sent
+# anywhere else.
 
 version: "3.7"
 
@@ -30,7 +37,7 @@ services:
   web:
     # Pin the exact released version - never `:latest`, never `v`-prefixed.
     # Bump in lockstep with umbrel-app.yml `version:` on every release.
-    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.2
+    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.3
     restart: on-failure
     stop_grace_period: 30s
     volumes:

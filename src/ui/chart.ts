@@ -121,7 +121,10 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   // interaction
   var hover = null;          // { x, y } in CSS px, or null
-  var drag = null;           // { x0, x1 } during a drag-zoom selection
+  // drag holds an in-progress gesture. mode "pan" (plain left-drag / single-finger
+  // touch) shifts the x view window; mode "zoom" (Shift+drag) is the range-select
+  // rectangle. null when idle.
+  var drag = null;
   var rafPending = false;
 
   function utcMidnight(ms) {
@@ -356,7 +359,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     drawCaution(ctx);   // dim hatch over the >caution-year region (over data)
     drawAxisLabels(ctx);
     if (hover) drawCrosshair(ctx);
-    if (drag) drawDragRect(ctx);
+    if (drag && drag.mode === "zoom") drawDragRect(ctx);
   }
 
   function placeholder(ctx, msg) {
@@ -820,29 +823,125 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     return pt.x >= G.ml && pt.x <= G.ml + G.mw && pt.y >= G.mt && pt.y <= G.mt + G.mh;
   }
 
+  function setCursor(name) { if (els && els.main && els.main.style) els.main.style.cursor = name; }
+
+  // Start a gesture at plot-x x. Shift held selects a range to zoom into;
+  // otherwise it is a pan that carries the view along with the
+  // pointer. A pan snapshots the view at grab time so every move recomputes from a
+  // stable origin (no accumulation drift) and can bail out cleanly under ~4px.
+  function beginDrag(x, shift) {
+    hover = null; hideTooltip();
+    if (shift) {
+      drag = { mode: "zoom", x0: x, x1: x };
+      setCursor("crosshair");
+    } else {
+      drag = { mode: "pan", x0: x, x1: x, view0: { min: view.min, max: view.max }, panned: false };
+      setCursor("grabbing");
+    }
+  }
+
+  // Pan window derived from the grab-time view0 shifted by dpx pixels. The point
+  // grabbed under the cursor stays under the cursor. date mode shifts by the
+  // pixel->ms scale; log-days mode shifts in log10(days) space. Clamped to the full
+  // domain [data start, Dec 31 projectionEndYear] WITHOUT changing the span.
+  function panFrom(view0, dpx) {
+    if (prefs.xMode === "logDays") {
+      var loL = log10(daysCont(view0.min)), hiL = log10(daysCont(view0.max));
+      var span = hiL - loL;
+      var dL = dpx / G.mw * span;                 // pixels -> log-day units
+      var nLo = loL - dL, nHi = hiL - dL;          // drag right reveals earlier days
+      var limLo = log10(daysCont(fullMin)), limHi = log10(daysCont(fullMax));
+      if (nLo < limLo) { nLo = limLo; nHi = limLo + span; }
+      if (nHi > limHi) { nHi = limHi; nLo = limHi - span; }
+      return { min: GENESIS + Math.pow(10, nLo) * DAY, max: GENESIS + Math.pow(10, nHi) * DAY };
+    }
+    var mspan = view0.max - view0.min;
+    var dms = dpx / G.mw * mspan;                  // pixels -> ms
+    var a = view0.min - dms, b = view0.max - dms;   // drag right reveals earlier time
+    if (a < fullMin) { a = fullMin; b = fullMin + mspan; }
+    if (b > fullMax) { b = fullMax; a = fullMax - mspan; }
+    return { min: a, max: b };
+  }
+
+  // Apply a pan for the pointer now at plot-x x. Movement under ~4px is left as a
+  // click (no view change, no preset clear) so genuine double-click resets aren't
+  // broken by micro-jitter; once the threshold is crossed the pan clears the active
+  // preset chip exactly once (existing onPresetCleared) and tracks the pointer.
+  function applyPan(x) {
+    var dpx = x - drag.x0;
+    if (!drag.panned) {
+      if (Math.abs(dpx) < 4) return;
+      drag.panned = true;
+      if (onPresetCleared) onPresetCleared();
+    }
+    view = panFrom(drag.view0, dpx);
+  }
+
   function onMove(ev) {
     var pt = localPt(ev);
-    if (drag) { drag.x1 = pt.x; scheduleDraw(); return; }
+    if (drag) {
+      drag.x1 = pt.x;
+      if (drag.mode === "pan") applyPan(pt.x);
+      scheduleDraw();
+      return;
+    }
     if (inPlot(pt)) { hover = pt; scheduleDraw(); }
     else if (hover) { hover = null; hideTooltip(); scheduleDraw(); }
   }
-  function onLeave() { if (hover || drag) { hover = null; drag = null; hideTooltip(); scheduleDraw(); } }
+  function onLeave() {
+    // A pan continues even if the pointer briefly leaves the plot; the window-level
+    // mouseup finalises it. A zoom selection or plain hover is cleared on leave.
+    if (drag && drag.mode === "pan") return;
+    if (hover || drag) { hover = null; drag = null; hideTooltip(); scheduleDraw(); }
+  }
   function onDown(ev) {
     var pt = localPt(ev);
     if (!inPlot(pt)) return;
-    drag = { x0: pt.x, x1: pt.x };
+    beginDrag(pt.x, !!ev.shiftKey);
     ev.preventDefault();
   }
-  function onUp(ev) {
+  function onUp() {
     if (!drag) return;
-    var x0 = Math.min(drag.x0, drag.x1), x1 = Math.max(drag.x0, drag.x1);
-    var moved = (x1 - x0) > 4;
+    var d = drag;
     drag = null;
-    if (moved) {
-      var a = pxToMs(clamp(x0, G.ml, G.ml + G.mw));
-      var b = pxToMs(clamp(x1, G.ml, G.ml + G.mw));
-      setView(a, b, true);
-    } else { scheduleDraw(); }
+    setCursor("grab");
+    if (d.mode === "zoom") {
+      var x0 = Math.min(d.x0, d.x1), x1 = Math.max(d.x0, d.x1);
+      if ((x1 - x0) > 4) {
+        var a = pxToMs(clamp(x0, G.ml, G.ml + G.mw));
+        var b = pxToMs(clamp(x1, G.ml, G.ml + G.mw));
+        setView(a, b, true);
+        return;
+      }
+    }
+    scheduleDraw();
+  }
+  // Single-finger touch drag pans (pinch-zoom is out of scope this round).
+  function touchLocal(t) {
+    var rect = els.main.getBoundingClientRect();
+    return { x: t.clientX - rect.left, y: t.clientY - rect.top };
+  }
+  function onTouchStart(ev) {
+    if (!ev.touches || ev.touches.length !== 1) { drag = null; return; }
+    var pt = touchLocal(ev.touches[0]);
+    if (!inPlot(pt)) return;
+    beginDrag(pt.x, false);
+    ev.preventDefault();
+  }
+  function onTouchMove(ev) {
+    if (!drag || drag.mode !== "pan") return;
+    if (!ev.touches || ev.touches.length !== 1) return;
+    var pt = touchLocal(ev.touches[0]);
+    drag.x1 = pt.x;
+    applyPan(pt.x);
+    scheduleDraw();
+    ev.preventDefault();
+  }
+  function onTouchEnd() {
+    if (!drag) return;
+    drag = null;
+    setCursor("grab");
+    scheduleDraw();
   }
   function onWheel(ev) {
     var pt = localPt(ev);
@@ -884,6 +983,11 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     window.addEventListener("mouseup", onUp);
     els.main.addEventListener("wheel", onWheel, { passive: false });
     els.main.addEventListener("dblclick", onDbl);
+    els.main.addEventListener("touchstart", onTouchStart, { passive: false });
+    els.main.addEventListener("touchmove", onTouchMove, { passive: false });
+    els.main.addEventListener("touchend", onTouchEnd);
+    els.main.addEventListener("touchcancel", onTouchEnd);
+    setCursor("grab");
     if (typeof ResizeObserver !== "undefined") {
       var ro = new ResizeObserver(function () { scheduleDraw(); });
       ro.observe(els.wrap);

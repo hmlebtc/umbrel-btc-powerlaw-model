@@ -140,7 +140,8 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   /* Bigger chart (v0.1.2): responsive height, resized by the engine on window resize */
   #chartCard { padding: 14px; }
   #chartWrap { position: relative; width: 100%; height: clamp(460px, 62vh, 780px); }
-  #chartCanvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  #chartCanvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #chartCanvas:active { cursor: grabbing; }
   #oscWrap { position: relative; width: 100%; height: 176px; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
   #oscCanvas { width: 100%; height: 170px; display: block; }
   .osc-title { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
@@ -217,6 +218,19 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .yt-prog { color: var(--btc); }
   .yt-beyond td { color: var(--faint); }
   .ytable-foot { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
+  /* Red/green vs actuals (v0.1.3): model cells tinted by whether the line sat at
+     or above the year's actual close. */
+  td.yt-hi { color: #42A04C; }
+  td.yt-lo { color: #EF5350; }
+  /* Year-end table value-mode toggle + holdings controls (v0.1.3) */
+  .yt-modeseg { margin-left: auto; }
+  .yt-holdings-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; }
+  .yt-holdings-ctl label { font-weight: 600; color: var(--text); }
+  .yt-holdings-ctl input { width: 160px; font: inherit; font-size: 14px; padding: 7px 10px; border-radius: 9px; background: var(--input); border: 1px solid var(--border2); color: var(--text); font-variant-numeric: tabular-nums; }
+  .yt-holdings-ctl input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(3,169,244,0.18); }
+  .yt-btc-cell { padding: 3px 8px !important; }
+  input.yt-btc-input { width: 108px; font: inherit; font-size: 12.5px; padding: 4px 7px; border-radius: 7px; background: var(--input); border: 1px solid var(--border2); color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+  input.yt-btc-input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgba(3,169,244,0.18); }
 
   .srcchips { display: flex; flex-wrap: wrap; gap: 8px; }
   .srcchip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--card2); color: var(--text); font-size: 12px; cursor: pointer; }
@@ -350,7 +364,7 @@ const PAGE_BODY: string = String.raw`</span>
       <p>The green line is Bitcoin's actual daily price; the ring at the end is the live price for today, which isn't final until the day closes. The white line is the power-law trend fitted to the entire history - it is refit from scratch at every update, so it can shift slightly as new data arrives.</p>
       <p>The dotted lines are percentiles of the model's own history: price has historically closed below the 97.5% line on 97.5% of all days, below the 16.5% line on only 16.5% of days, and so on. The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set; open 'More bands' in the legend to add others, including the 50% median. They are descriptions of the past, not statistical guarantees about the future.</p>
       <p>Left of the 'today' line is history; right of it is the same formula extended forward. The hatched area past ~2040 is where the model's own authors say it should not be trusted. Halving lines mark Bitcoin's supply-cut events (dashed ones are estimates).</p>
-      <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to zoom, scroll to zoom at the cursor, double-click to reset.</p>
+      <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to move around the chart, hold Shift and drag to select a range to zoom into, scroll to zoom at the cursor, and double-click to reset the view.</p>
     </div>
     <div class="chart-controls">
       <div class="ctl-group"><span class="ctl-label">X</span>
@@ -424,15 +438,33 @@ const PAGE_BODY: string = String.raw`</span>
         <span id="yearTableChevron">&#9662;</span> Year-end model table
       </button>
       <button class="infobtn" type="button" data-help="yearEndTable" aria-label="About: Year-end model table" aria-expanded="false">i</button>
-      <span class="hint">Dec 31 actual close vs. the current fit</span>
+      <div class="seg-group yt-modeseg" role="group" aria-label="Table value mode">
+        <button class="seg seg-on" id="ytMode_price" type="button" aria-pressed="true">Price</button>
+        <button class="seg" id="ytMode_holdings" type="button" aria-pressed="false">My holdings</button>
+      </div>
     </div>
     <div id="yearTableBody">
+      <div class="yt-holdings-ctl" id="ytHoldingsControl" style="display:none">
+        <label for="ytGlobalBtc">BTC held:</label>
+        <input id="ytGlobalBtc" type="number" min="0" max="21000000" step="any" inputmode="decimal" aria-label="BTC held, applies to all years">
+        <span class="muted">applies to all years</span>
+      </div>
       <div class="ytable-scroll">
         <table class="ytable">
           <thead>
-            <tr>
+            <tr id="ytHeadPrice">
               <th scope="col">Year</th>
               <th scope="col">Actual close</th>
+              <th scope="col">2.5%</th>
+              <th scope="col">16.5%</th>
+              <th scope="col">Trend</th>
+              <th scope="col">83.5%</th>
+              <th scope="col">97.5%</th>
+            </tr>
+            <tr id="ytHeadHoldings" style="display:none">
+              <th scope="col">Year</th>
+              <th scope="col">BTC</th>
+              <th scope="col">Actual value</th>
               <th scope="col">2.5%</th>
               <th scope="col">16.5%</th>
               <th scope="col">Trend</th>

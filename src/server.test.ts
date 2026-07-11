@@ -415,6 +415,114 @@ test('PUT /api/settings: a valid patch is applied', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// /api/settings holdings (spec section 13.2) — round-trip + 400 on invalid,
+// through the real HTTP router (not just SettingsStore).
+// ---------------------------------------------------------------------------
+
+test('PUT /api/settings: holdings round-trips (enable, globalBtc, perYear)', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const holdings = { enabled: true, globalBtc: 1.5, perYear: { '2025': 0.25, '2030': 3 } };
+      const { status, body } = await putJSON(baseUrl, '/api/settings', { holdings });
+      assert.equal(status, 200);
+      assert.equal(body.ok, true);
+      // The response echoes the persisted settings, holdings included.
+      assert.deepEqual(body.data.holdings, holdings);
+      assert.deepEqual(ctx.settings.get().holdings, holdings);
+
+      // GET reflects it too.
+      const got = await getJSON(baseUrl, '/api/settings');
+      assert.deepEqual(got.body.data.holdings, holdings);
+
+      // A follow-up PUT REPLACES perYear wholesale (spec 13.2), not a union.
+      const replaced = await putJSON(baseUrl, '/api/settings', { holdings: { perYear: { '2040': 7 } } });
+      assert.equal(replaced.status, 200);
+      assert.deepEqual(ctx.settings.get().holdings.perYear, { '2040': 7 });
+      assert.equal(ctx.settings.get().holdings.enabled, true); // sibling survives
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('PUT /api/settings: invalid holdings is rejected 400 with errors[]', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      for (const holdings of [
+        { globalBtc: -1 }, // negative
+        { globalBtc: 21_000_001 }, // above the 21M supply
+        { perYear: { '1999': 1 } }, // year key out of 2009..2060
+        { perYear: { '2025': -2 } }, // negative per-year amount
+        { perYear: 'nope' }, // non-object perYear
+      ]) {
+        const { status, body } = await putJSON(baseUrl, '/api/settings', { holdings });
+        assert.equal(status, 400, JSON.stringify(holdings));
+        assert.equal(body.ok, false);
+        assert.ok(Array.isArray(body.errors) && body.errors.length > 0);
+      }
+      // A rejected PUT leaves holdings at its default.
+      assert.deepEqual(ctx.settings.get().holdings, { enabled: false, globalBtc: 0, perYear: {} });
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('server boots against a legacy settings.json without holdings (backward-compat)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-legacy-settings-'));
+  try {
+    // Persist a pre-v0.1.3 settings.json (no holdings key), then let the store
+    // load it from disk — the deep-merge-onto-defaults path supplies holdings.
+    writeFileSync(
+      join(dir, 'settings.json'),
+      JSON.stringify({
+        refitIntervalHours: 12,
+        spotPollMinutes: 5,
+        projectionEndYear: 2045,
+        bandMode: 'pointInTime',
+        sourceMode: 'auto',
+        enabledSources: defaultSettings().enabledSources,
+      }),
+      'utf8',
+    );
+    const settings = new SettingsStore(dir); // loads from disk (no `initial`)
+    const getSettings = () => settings.get();
+    const registry = new SourceRegistry(createMockSources());
+    const priceStore = new PriceStore();
+    const modelStore = new ModelStore();
+    const jobStats = new JobStats();
+    const events = new EventLog();
+    const spot = new SpotAggregator(registry, getSettings);
+    const jobRunner = new JobRunner({ registry, priceStore, spot, getSettings, modelStore, jobStats, events });
+    const ctx: AppContext = {
+      settings,
+      priceStore,
+      modelStore,
+      spot,
+      jobRunner,
+      registry,
+      events,
+      mock: true,
+      startedAt: new Date().toISOString(),
+      version: '0.1.3',
+      gitSha: 'test-sha',
+    };
+
+    assert.deepEqual(settings.get().holdings, { enabled: false, globalBtc: 0, perYear: {} });
+
+    await withServer(ctx, async (baseUrl) => {
+      const { status, body } = await getJSON(baseUrl, '/api/settings');
+      assert.equal(status, 200);
+      assert.deepEqual(body.data.holdings, { enabled: false, globalBtc: 0, perYear: {} });
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // /api/refit single-flight: deterministic 202 then 409 via a gated source.
 // ---------------------------------------------------------------------------
 

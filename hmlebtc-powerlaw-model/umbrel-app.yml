@@ -6,7 +6,7 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.2"
+version: "0.1.3"
 tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
@@ -31,6 +31,21 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.1.3 - drag-to-pan, holdings valuation, and a reality check on the year-end table.
+
+  Dragging the chart now pans it (hold Shift and drag for the old range-zoom selection); wheel
+  zoom and double-click reset are unchanged. The year-end model table gains a "My holdings" mode
+  alongside the existing "Price" view - enter one BTC amount that applies to every year, or
+  override individual years if you plan to keep accumulating - and every model column (and the
+  actual close) switches to showing that holding's value at each line's price instead of the raw
+  price itself. Holdings amounts are stored only in the app's own settings.json on your Umbrel,
+  behind its login, and are never sent anywhere else; there is deliberately no environment-variable
+  seed for them, since they are personal data you enter on the dashboard, not deployment
+  configuration. In both table modes, every model column for a year with a known actual close is
+  now tinted green where that line sat at or above the actual price and red where it sat below, so
+  it's easy to see at a glance which bands actually contained reality. No data or settings
+  migration needed; existing installs pick this up on their next update.
+
   v0.1.2 - individual percentile lines and a year-end table.
 
   The band fan moves from four fixed pairs to eleven individually labeled, individually
