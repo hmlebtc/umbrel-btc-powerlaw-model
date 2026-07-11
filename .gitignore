@@ -1,0 +1,13 @@
+node_modules/
+dist/
+
+# runtime data
+data/
+
+# secrets - none are meant to be committed; all settings (refit cadence,
+# spot poll interval, projection year, band mode, source mode) are
+# entered in the dashboard or via BPL_* first-boot env seeds, never
+# baked into a tracked file.
+.env
+
+*.tsbuildinfo

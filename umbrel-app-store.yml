@@ -1,0 +1,14 @@
+# Umbrel Community App Store manifest. Lives at the repo root because
+# Umbrel's "Add App Store" flow expects this file there.
+#
+# Operators add this store to their Umbrel via:
+#   Settings → App Stores → Add App Store
+#   → https://github.com/hmlebtc/umbrel-btc-powerlaw-model
+# Umbrel then walks each top-level directory of this repo looking for
+# umbrel-app.yml manifests. The app dir name must be prefixed with the
+# `id` below - here that's `hmlebtc-powerlaw-model/`.
+
+id: hmlebtc-powerlaw
+# Umbrel renders this as "<name> App Store".
+name: BTC Power Law Model
+tagline: Always-current Bitcoin power law model, refit from live data

@@ -1,0 +1,45 @@
+# Umbrel docker-compose for BTC Power Law Model.
+#
+# - `app_proxy` is Umbrel's auth + reverse-proxy sidecar (it adds Umbrel's
+#   login in front of the dashboard, which has no auth of its own).
+# - `web` is the daemon + dashboard, pulled from GHCR. It listens on 3013
+#   and keeps its persisted state (settings.json, canonical price history,
+#   model fit history, activity log, job stats) under /data, bind-mounted
+#   to Umbrel's per-app persistent storage.
+#
+# No privileged access, no host pid/network namespace, no docker.sock -
+# this app only talks to public price APIs over the network and serves
+# its own dashboard; app_proxy is the only thing standing between it and
+# the internet-facing side of Umbrel.
+#
+# These env values only SEED settings.json on first boot - after that
+# the daemon reads whatever is saved in settings.json (dashboard edits
+# or PUT /api/settings win), so an app update or container recreation
+# never clobbers a live configuration change.
+
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      # Must match this compose project's web service. Umbrel uses the app
+      # dir name as the project prefix -> `<dir>_web_1`.
+      APP_HOST: hmlebtc-powerlaw-model_web_1
+      APP_PORT: 3013
+
+  web:
+    # Pin the exact released version - never `:latest`, never `v`-prefixed.
+    # Bump in lockstep with umbrel-app.yml `version:` on every release.
+    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.0
+    restart: on-failure
+    stop_grace_period: 30s
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    environment:
+      BPL_HTTP_PORT: "3013"
+      BPL_DATA_DIR: /data
+      BPL_REFIT_INTERVAL_HOURS: "12"
+      BPL_SPOT_POLL_MINUTES: "5"
+      BPL_PROJECTION_END_YEAR: "2045"
+      BPL_BAND_MODE: pointInTime
+      BPL_SOURCE_MODE: auto

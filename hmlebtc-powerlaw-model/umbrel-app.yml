@@ -1,0 +1,42 @@
+# Umbrel app manifest. Loaded when this repo is added as a Community App
+# Store. The directory name and the `id` below must be prefixed with the
+# store id from umbrel-app-store.yml (`hmlebtc-powerlaw`).
+
+manifestVersion: 1
+id: hmlebtc-powerlaw-model
+category: finance
+name: BTC Power Law Model
+version: "0.1.0"
+tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
+icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
+# Umbrel renders the description literally - each paragraph is one physical
+# line, blank line between paragraphs. Do not soft-wrap.
+description: |
+  Bitcoin's price has tracked a power law against its own age since genesis - price = A * t^n, where t is days since the 2009-01-03 genesis block - closely enough that porkopolis.io/thechart and others use it as a long-run valuation reference. This app runs that same regression itself, continuously, on your own Umbrel: no static coefficients are ever baked into the code, every number on the dashboard is recomputed from data at fit time.
+  The model refits automatically every 12 hours (configurable) and on demand via a dashboard button with a live progress bar, step label, and ETA. Its input is a daily USD price history amalgamated from multiple free, keyless APIs (blockchain.info, Bitstamp, Binance, Kraken, mempool.space) cross-checked against each other, plus a live spot price - the median of several exchanges - folded in as a provisional point for today until the day's real close is available.
+  The chart mirrors porkopolis.io/thechart: an OLS power regression plotted with price and trend on log-log axes, four residual-percentile bands (2.5/16.5/83.5/97.5, in either a full-sample or a point-in-time expanding-window mode), halving markers, and a projection out to 2045 with the model author's own stated ~2040 validity horizon called out visually. Readout cards surface fair value, deviation percent, current quantile, the fitted exponent and R², and more; a settings drawer, source health chips, and an activity feed round out the dashboard. A high R-squared and a clean-looking chart are not proof of a predictive law - read the README's "Limitations & honest caveats" section before treating any of this as investment advice. Not financial advice.
+developer: hmlebtc
+website: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
+repo: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
+support: https://github.com/hmlebtc/umbrel-btc-powerlaw-model/issues
+# Host port Umbrel publishes the app on - must be unique across all
+# installed apps. The daemon listens on 3013 inside the container
+# (docker-compose APP_PORT / BPL_HTTP_PORT); only this host-facing port
+# is a distinct number chosen to avoid collisions with other apps.
+port: 7913
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+submitter: hmlebtc
+submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
+releaseNotes: |
+  v0.1.0 - first release.
+
+  A continuously self-refitting Bitcoin power-law dashboard: full daily USD history amalgamated
+  from multiple free keyless APIs, a live median spot price folded in as a provisional point for
+  today, an OLS power-law fit (price = A * t^n) recomputed on a configurable cadence and on
+  demand, and a porkopolis.io/thechart-style chart with residual-percentile bands, halving
+  markers, and a projection to 2045. No static model coefficients anywhere in the code - every
+  number shown is derived from data at fit time. Settings drawer, source health chips, activity
+  feed, and a job progress UI for manual refits.

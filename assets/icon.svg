@@ -1,0 +1,37 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    BTC Power Law Model app icon (redesigned 2026-07-10 per explicit user
+    request - spec section 9). Simple "chart going up" mark: a dark
+    rounded square (#101418) background and ONE bold green (#42A04C)
+    ascending polyline - a staircase-ish rise (with one small pull-back,
+    like a real chart) ending in a strong final upswing - plus small
+    circle markers at each vertex. No bitcoin glyph, no band lines, no
+    other ornament. The same shapes are re-drawn analytically (not parsed
+    from this file) by scripts/render_icons.py to produce
+    assets/icon-512.png / icon-256.png - keep both in sync by hand if the
+    design ever changes. The polyline's point list and the vertex-marker
+    centers are shared verbatim with render_icons.py (CURVE_POINTS): the
+    raster version tests each pixel's distance to the nearest polyline
+    segment against a half-thickness ("thick polyline via distance test"),
+    rather than using a stroke primitive.
+  -->
+
+  <!-- Dark rounded-square background, rx ~ 22% of the canvas -->
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="#101418"/>
+
+  <!-- Rising line-chart mark: one bold ascending polyline, staircase-ish
+       with a small pull-back and a strong final upswing, plus small
+       circle markers at each vertex. Point list shared verbatim with
+       render_icons.py (CURVE_POINTS); stroke-width 28 here matches the
+       rasterizer's distance-test half-thickness of 14. -->
+  <polyline points="92,390 198,344 268,372 356,288 432,104"
+            fill="none" stroke="#42a04c" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g fill="#42a04c">
+    <circle cx="92" cy="390" r="22"/>
+    <circle cx="198" cy="344" r="22"/>
+    <circle cx="268" cy="372" r="22"/>
+    <circle cx="356" cy="288" r="22"/>
+    <circle cx="432" cy="104" r="22"/>
+  </g>
+</svg>
