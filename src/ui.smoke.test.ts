@@ -70,9 +70,10 @@ test("dashboard has the collapsible chart explainer panel with its verbatim copy
   assert.ok(DASHBOARD_HTML.includes('id="explainToggle"'), "explainer toggle button missing");
   assert.ok(DASHBOARD_HTML.includes("What am I looking at?"), "explainer heading missing");
   // one distinctive marker phrase from each of the four verbatim paragraphs
+  // (the band paragraph was rewritten for the v0.1.2 individual-line vernacular)
   const markers = [
     "the ring at the end is the live price for today",
-    "half of all days fall inside the teal pair",
+    "The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set",
     "The hatched area past ~2040 is where the model's own authors",
     "it is the same information as the bands, flattened out"
   ];
@@ -81,14 +82,72 @@ test("dashboard has the collapsible chart explainer panel with its verbatim copy
   }
 });
 
-test("dashboard has the band legend row with the four toggleable pairs", () => {
-  for (const key of ["50", "67", "95", "99"]) {
-    assert.ok(DASHBOARD_HTML.includes('id="lg_' + key + '"'), "legend chip lg_" + key + " missing");
-    assert.ok(DASHBOARD_HTML.includes('data-band="' + key + '"'), "legend chip data-band " + key + " missing");
+test("dashboard has the per-percentile legend with a More-bands expander", () => {
+  // the four default chips are visible in the top legend row...
+  for (const key of ["p025", "p165", "p835", "p975"]) {
+    assert.ok(DASHBOARD_HTML.includes('id="lg_' + key + '"'), "default legend chip lg_" + key + " missing");
+    assert.ok(DASHBOARD_HTML.includes('data-band="' + key + '"'), "default legend chip data-band " + key + " missing");
+  }
+  // ...and the seven non-default chips (incl. the 50% median) live in the expander row
+  for (const key of ["p005", "p10", "p25", "p50", "p75", "p90", "p995"]) {
+    assert.ok(DASHBOARD_HTML.includes('id="lg_' + key + '"'), "expander legend chip lg_" + key + " missing");
+  }
+  // the "More bands" expander chip + its revealed row
+  assert.ok(DASHBOARD_HTML.includes('id="moreBandsToggle"'), "More-bands expander toggle missing");
+  assert.ok(DASHBOARD_HTML.includes('id="moreBandsRow"'), "More-bands expander row missing");
+  assert.ok(DASHBOARD_HTML.includes("More bands"), "More-bands expander label missing");
+  // percentile labels are shown on the chips
+  for (const label of ["2.5%", "16.5%", "83.5%", "97.5%", "0.5%", "50%", "99.5%"]) {
+    assert.ok(DASHBOARD_HTML.includes(">" + label + "<"), "legend chip label " + label + " missing");
   }
   // Price and Trend static indicators are present too
   assert.ok(DASHBOARD_HTML.includes('id="chartLegend"'), "legend row container missing");
-  assert.ok(DASHBOARD_HTML.includes('aria-pressed="true"'), "band chips missing aria-pressed");
+  assert.ok(DASHBOARD_HTML.includes('aria-pressed="true"'), "default chips missing aria-pressed");
+
+  // the OLD v0.1.1 pair-chip ids must be gone entirely
+  for (const oldKey of ["50", "67", "95", "99"]) {
+    assert.ok(!DASHBOARD_HTML.includes('id="lg_' + oldKey + '"'), "stale pair chip lg_" + oldKey + " still present");
+  }
+});
+
+test("dashboard has the year-end model table (title, columns, footnote, info)", () => {
+  assert.ok(DASHBOARD_HTML.includes('id="yearTableCard"'), "year-end table card missing");
+  assert.ok(DASHBOARD_HTML.includes('id="yearTableRows"'), "year-end table body missing");
+  assert.ok(DASHBOARD_HTML.includes("Year-end model table"), "year-end table title missing");
+  // the fixed column headers (Year | Actual close | 2.5% | 16.5% | Trend | 83.5% | 97.5%)
+  for (const col of ["Year", "Actual close", "2.5%", "16.5%", "Trend", "83.5%", "97.5%"]) {
+    assert.ok(DASHBOARD_HTML.includes(">" + col + "</th>"), "year-end table column header " + col + " missing");
+  }
+  // the beyond-2040 footnote line
+  assert.ok(
+    DASHBOARD_HTML.includes("Years beyond ~2040 exceed the model author's stated validity horizon."),
+    "year-end table footnote missing",
+  );
+  // the info popover trigger for the card
+  assert.ok(DASHBOARD_HTML.includes('data-help="yearEndTable"'), "year-end table info button missing");
+});
+
+test("dashboard carries the v0.1.2 verbatim copy phrases (bands + table)", () => {
+  const phrases = [
+    "with no hindsight",                                    // band-mode help (kept)
+    "more conservative funnel",                             // band-mode help (new)
+    "descriptions of the past, not statistical guarantees", // explainer band paragraph (new)
+    "the classic porkopolis set",                           // explainer band paragraph (new)
+    "December 31st values for every year",                  // year-end table help (new)
+  ];
+  for (const p of phrases) {
+    assert.ok(DASHBOARD_HTML.includes(p), "missing verbatim copy phrase: " + p);
+  }
+});
+
+test("chart tooltip uses percentile labels, never hi/lo wording", () => {
+  const backtick = String.fromCharCode(96);
+  // the v0.1.1 tooltip appended ' hi' / ' lo' to each pair label — that wording is gone
+  assert.ok(!CHART_JS.includes('" hi"'), "tooltip still uses the old ' hi' label suffix");
+  assert.ok(!CHART_JS.includes('" lo"'), "tooltip still uses the old ' lo' label suffix");
+  // and no BAND_PAIRS-era construct leaked through
+  assert.ok(!CHART_JS.includes("BAND_PAIRS"), "chart engine still references the old BAND_PAIRS model");
+  assert.ok(!CHART_JS.includes(backtick), "CHART_JS contains a backtick");
 });
 
 test("dashboard inlines CHART_JS and APP_JS (markers + bodies)", () => {
@@ -141,4 +200,146 @@ test("no String.raw literal leaked a backtick or a dollar-brace", () => {
     assert.ok(!s.includes(backtick), name + " contains a backtick");
     assert.ok(!s.includes(dollarBrace), name + " contains a dollar-brace");
   }
+});
+
+// ===========================================================================
+//  BAND-PREFERENCES MIGRATION (spec 12.1, REVISED) — live localStorage repro
+// ===========================================================================
+// APP_JS is an IIFE that, at eval time, reads window.localStorage['bpl.prefs.v1']
+// and (for the legacy v0.1.1 pair shape {50,67,95,99}) migrates prefs.bands to the
+// v0.1.2 per-line shape AND persists the new shape immediately. We reproduce a page
+// load exactly as Fable's adversarial review did: seed a localStorage stub with the
+// legacy shape, evaluate the REAL APP_JS string against thin window/document stubs
+// (fetch rejects, so no render path runs and the migration persist is the only
+// write), then read the stub back to observe both the migrated map and the fact
+// that the legacy pair shape was overwritten. The harness never reimplements any
+// app logic — it only supplies the browser globals APP_JS closes over.
+
+interface LocalStorageStub {
+  store: Record<string, string>;
+  getItem(k: string): string | null;
+  setItem(k: string, v: string): void;
+  removeItem(k: string): void;
+}
+function makeLocalStorage(seed: string): LocalStorageStub {
+  const store: Record<string, string> = { "bpl.prefs.v1": seed };
+  return {
+    store,
+    getItem(k) { const v = store[k]; return v === undefined ? null : v; },
+    setItem(k, v) { store[k] = String(v); },
+    removeItem(k) { delete store[k]; },
+  };
+}
+
+// Evaluate APP_JS with a localStorage seeded to `seed`; return the stub's backing
+// store so tests can inspect what was persisted under 'bpl.prefs.v1'.
+function evalAppWithPrefs(seed: string): Record<string, string> {
+  const localStorage = makeLocalStorage(seed);
+  const noop = (): void => {};
+  const windowStub: Record<string, unknown> = {
+    localStorage,
+    addEventListener: noop,
+    removeEventListener: noop,
+    innerWidth: 1440,
+    innerHeight: 900,
+  };
+  // getElementById returns null everywhere => every DOM writer in APP_JS no-ops
+  // (each guards on the element existing); readyState !== "loading" => boot() runs
+  // synchronously. The migration + persist happen at module-eval time, before boot.
+  const documentStub: Record<string, unknown> = {
+    readyState: "complete",
+    getElementById: () => null,
+    querySelectorAll: () => [],
+    createElement: () => ({ style: {}, setAttribute: noop, appendChild: noop, classList: { add: noop, remove: noop } }),
+    addEventListener: noop,
+    removeEventListener: noop,
+  };
+  // fetch rejects; apiGet/apiSend catch it and return {ok:false}, so no status/model
+  // render runs and savePrefs is only ever reached by the migration persist.
+  const fetchStub = (): Promise<never> => Promise.reject(new Error("no network in test"));
+  const setIntervalStub = (): number => 0;
+  const clearIntervalStub = noop;
+  const setTimeoutStub = (): number => 0;
+  const clearTimeoutStub = noop;
+  const rafStub = (): number => 0;
+
+  const factory = new Function(
+    "window", "document", "fetch",
+    "setInterval", "clearInterval", "setTimeout", "clearTimeout", "requestAnimationFrame",
+    APP_JS,
+  ) as (
+    w: unknown, d: unknown, f: unknown,
+    si: unknown, ci: unknown, st: unknown, ct: unknown, raf: unknown,
+  ) => void;
+  factory(
+    windowStub, documentStub, fetchStub,
+    setIntervalStub, clearIntervalStub, setTimeoutStub, clearTimeoutStub, rafStub,
+  );
+
+  return localStorage.store;
+}
+
+const NEW_DEFAULT_BANDS: Record<string, boolean> = {
+  p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+  p75: false, p835: true, p90: false, p975: true, p995: false,
+};
+const EXTRA_KEYS = ["p005", "p10", "p25", "p50", "p75", "p90", "p995"];
+
+// The raw JSON persisted under 'bpl.prefs.v1' after a page load, asserting it exists.
+function persistedPrefs(store: Record<string, string>): string {
+  const raw = store["bpl.prefs.v1"];
+  assert.ok(raw, "prefs were not persisted after migration");
+  return raw;
+}
+// The migrated per-line bands map read back out of the persisted prefs.
+function persistedBands(store: Record<string, string>): Record<string, boolean> {
+  return JSON.parse(persistedPrefs(store)).bands as Record<string, boolean>;
+}
+
+// (a) v0.1.1 default (all pairs true) -> exactly the new default set (four on, seven off).
+test("legacy v0.1.1 default bands migrate to exactly the new default set", () => {
+  const seed = JSON.stringify({ bands: { "50": true, "67": true, "95": true, "99": true } });
+  const bands = persistedBands(evalAppWithPrefs(seed));
+  assert.deepEqual(bands, NEW_DEFAULT_BANDS, "v0.1.1 default did not migrate to classic-four-on / extras-off");
+  // exactly four lines end up on — the eight-line defect must not recur
+  const onCount = Object.keys(bands).filter((k) => bands[k] === true).length;
+  assert.equal(onCount, 4, "expected exactly four visible bands after migration, got " + onCount);
+});
+
+// (b) v0.1.1 with 95:false,67:true -> p025/p975 off, p165/p835 on, extras off.
+test("legacy 95:false,67:true migrates the classic pairs and forces extras off", () => {
+  const seed = JSON.stringify({ bands: { "95": false, "67": true } });
+  const bands = persistedBands(evalAppWithPrefs(seed));
+  assert.equal(bands.p025, false, "95:false should map p025 off");
+  assert.equal(bands.p975, false, "95:false should map p975 off");
+  assert.equal(bands.p165, true, "67:true should map p165 on");
+  assert.equal(bands.p835, true, "67:true should map p835 on");
+  for (const k of EXTRA_KEYS) {
+    assert.equal(bands[k], false, "extra percentile " + k + " must be forced off on migration");
+  }
+});
+
+// (c) After migration the persisted shape contains p* keys and none of 50/67/95/99.
+test("migration persists the new per-line shape, never the legacy pair keys", () => {
+  const seed = JSON.stringify({ bands: { "50": true, "67": true, "95": true, "99": true } });
+  const store = evalAppWithPrefs(seed);
+  const raw = persistedPrefs(store);
+  const bands = persistedBands(store);
+  for (const k of ["p025", "p165", "p835", "p975"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(bands, k), "persisted bands missing per-line key " + k);
+  }
+  for (const legacy of ["50", "67", "95", "99"]) {
+    assert.ok(!Object.prototype.hasOwnProperty.call(bands, legacy), "legacy pair key " + legacy + " survived into persisted bands");
+    assert.ok(raw.indexOf('"' + legacy + '"') === -1, 'raw persisted prefs still contain a "' + legacy + '" key');
+  }
+});
+
+// Regression for the second reported defect: an already-migrated (new-shape) prefs
+// must be stable — the migration must NOT re-run and NOT rewrite localStorage each
+// load (previously the legacy shape survived and re-migrated on every reload).
+test("an already-migrated new-shape prefs load is stable and not rewritten", () => {
+  const legacy = JSON.stringify({ bands: { "50": true, "67": true, "95": true, "99": true } });
+  const migrated = persistedPrefs(evalAppWithPrefs(legacy));
+  const second = persistedPrefs(evalAppWithPrefs(migrated));
+  assert.equal(second, migrated, "second load re-migrated / rewrote an already-migrated prefs");
 });

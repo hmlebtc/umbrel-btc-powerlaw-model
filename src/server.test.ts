@@ -183,9 +183,11 @@ test('GET /api/status + /api/model: populated after a refit', async () => {
       assert.ok('bandOffsets' in model.body.data);
       assert.ok('falsifiability' in model.body.data);
       assert.equal(model.body.data.milestones.crossings.length, 3);
-      // A fresh v0.1.1 fit serves all eight band keys, non-decreasing in p-order.
+      // A fresh v0.1.2 fit serves all eleven band keys, non-decreasing in p-order.
       const bo = model.body.data.bandOffsets;
-      const inPOrder = [bo.p005, bo.p025, bo.p165, bo.p25, bo.p75, bo.p835, bo.p975, bo.p995];
+      const inPOrder = [
+        bo.p005, bo.p025, bo.p10, bo.p165, bo.p25, bo.p50, bo.p75, bo.p835, bo.p90, bo.p975, bo.p995,
+      ];
       for (const v of inPOrder) assert.equal(typeof v, 'number');
       for (let i = 1; i < inPOrder.length; i++) assert.ok(inPOrder[i] >= inPOrder[i - 1]);
     });
@@ -265,9 +267,88 @@ test('GET /api/model: serves a pre-v0.1.1 4-key bandOffsets record as-is (backwa
       assert.equal(status, 200);
       assert.equal(body.ok, true);
       assert.deepEqual(body.data.bandOffsets, legacyOffsets);
-      // Missing new keys are simply absent (the pairs aren't drawn until a refit).
-      for (const k of ['p005', 'p25', 'p75', 'p995']) {
+      // Missing new keys are simply absent (those lines aren't drawn until a
+      // refit) — both the v0.1.1 and the v0.1.2 additions.
+      for (const k of ['p005', 'p10', 'p25', 'p50', 'p75', 'p90', 'p995']) {
         assert.ok(!(k in body.data.bandOffsets), `unexpected ${k} served for a legacy record`);
+      }
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('GET /api/model: serves a pre-v0.1.2 8-key bandOffsets record as-is (backward-compat)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-legacy8-model-'));
+  try {
+    // A model.json written by v0.1.1: bandOffsets carries the eight-key band fan
+    // but not the v0.1.2 p10/p50/p90 additions. ModelStore.load must not crash,
+    // and /api/model must serve the record unchanged (no refit has happened yet)
+    // so the UI renders p10/p50/p90 chips disabled until the next model update.
+    const legacyOffsets = {
+      p005: -0.72,
+      p025: -0.5,
+      p165: -0.2,
+      p25: -0.12,
+      p75: 0.12,
+      p835: 0.2,
+      p975: 0.5,
+      p995: 0.72,
+    };
+    const legacy = {
+      current: {
+        fittedAt: '2026-04-01T00:00:00.000Z',
+        a: -16.8,
+        n: 5.7,
+        A: Math.pow(10, -16.8),
+        r2: 0.95,
+        sigma: 0.28,
+        points: 5850,
+        dataStart: '2010-07-18',
+        dataEnd: '2026-03-31',
+        bandMode: 'pointInTime',
+        bandOffsets: legacyOffsets,
+        includesProvisionalSpot: false,
+        durationMs: 1234,
+      },
+      history: [],
+    };
+    writeFileSync(join(dir, 'model.json'), JSON.stringify(legacy));
+
+    const settings = new SettingsStore(dir, defaultSettings());
+    const getSettings = () => settings.get();
+    const registry = new SourceRegistry(createMockSources());
+    const priceStore = new PriceStore();
+    const modelStore = new ModelStore(dir); // loads the legacy record from disk
+    const jobStats = new JobStats();
+    const events = new EventLog();
+    const spot = new SpotAggregator(registry, getSettings);
+    const jobRunner = new JobRunner({ registry, priceStore, spot, getSettings, modelStore, jobStats, events });
+    const ctx: AppContext = {
+      settings,
+      priceStore,
+      modelStore,
+      spot,
+      jobRunner,
+      registry,
+      events,
+      mock: true,
+      startedAt: new Date().toISOString(),
+      version: '0.1.2',
+      gitSha: 'test-sha',
+    };
+
+    // Loaded without throwing, keeping the eight v0.1.1 keys verbatim.
+    assert.deepEqual(modelStore.current()!.bandOffsets, legacyOffsets);
+
+    await withServer(ctx, async (baseUrl) => {
+      const { status, body } = await getJSON(baseUrl, '/api/model');
+      assert.equal(status, 200);
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.data.bandOffsets, legacyOffsets);
+      // The three v0.1.2 additions are absent until the next refit.
+      for (const k of ['p10', 'p50', 'p90']) {
+        assert.ok(!(k in body.data.bandOffsets), `unexpected ${k} served for a v0.1.1 record`);
       }
     });
   } finally {

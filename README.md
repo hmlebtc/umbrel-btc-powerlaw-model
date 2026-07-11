@@ -5,7 +5,7 @@
 An [Umbrel](https://umbrel.com/) app that keeps a Bitcoin power-law model - `price = A * t^n`, where `t`
 is days since the genesis block (2009-01-03 UTC) - continuously refit against the freshest data it can
 find, and charts it the way [porkopolis.io/thechart](https://porkopolis.io/thechart) does: a power
-regression plus four residual-percentile band pairs, projected out to 2045. Nothing about the fitted curve
+regression plus individually toggleable residual-percentile lines, projected out to 2045. Nothing about the fitted curve
 is hard-coded anywhere in this repo - every coefficient, band, and milestone the dashboard shows is
 recomputed from data each time the model refits. The published values you may have seen elsewhere
 (exponent `n` around 5.7, `R²` around 0.95) only ever appear here as test-tolerance corridors and in this
@@ -31,25 +31,39 @@ Letting the epoch be a setting would silently invalidate every fit history entry
 something for Bitcoin (the chain's own start) is the only anchor that doesn't need a disclaimer of its
 own.
 
-Two ways of computing the residual-percentile bands are supported, both against the same slope/intercept
-fit. Each way produces four percentile-band **pairs**, drawn on the chart cool-to-hot as they widen and
-each toggleable from a legend chip: 25/75 (**50%** of history inside, teal `#26A69A`), 16.5/83.5 (**67%**,
-blue `#03A9F4`), 2.5/97.5 (**95%**, red `#F44336`), and 0.5/99.5 (**99%**, purple `#AB47BC`, the
-near-never-breached envelope). Clicking a legend chip shows or hides that pair (on the chart, in the
-tooltip, and in the oscillator's guide lines); all four are on by default.
+Bands are drawn as eleven individually toggleable percentile **lines** rather than fixed pairs, colored
+cool-to-hot as they move away from the median. Four are on by default - 2.5% and 97.5% (red `#F44336`) and
+16.5% and 83.5% (blue `#03A9F4`) - and a "More bands" legend expander reveals seven more, all off by
+default: 0.5% and 99.5% (purple `#AB47BC`, the near-never-breached envelope), 10% and 90% (orange
+`#FF9800`), 25% and 75% (teal `#26A69A`), and the 50% median (grey `#9E9E9E`, dashed). Clicking any legend
+chip shows or hides that single line - on the chart, in the tooltip, and in the oscillator's guide lines.
 
-- **`fullSample`** - percentiles of the residuals from the single regression run across the entire
-  history, interpolated linearly between order statistics. Simple, but it lets *future* data (relative to
-  any given day in the series) inform how wide that day's band was - useful for a retrospective view, less
-  useful for asking "was this day statistically unusual, using only what was known at the time?"
+Two ways of computing those percentiles are supported, both against the same slope/intercept fit. Both
+modes draw the same kind of line - "price has historically closed below this line X% of the time" - they
+differ only in how history is scored:
+
+- **`fullSample`** - every day in history is compared against *today's* trend line. Simple, but it judges,
+  say, 2011's prices against a curve fitted on everything through today - hindsight. Because the early
+  years sit far from today's line, the extreme percentiles stretch wider: higher tops, lower floors.
 - **`pointInTime`** (the default) - mirrors the point-in-time methodology porkopolis.io switched its chart
-  to in January 2025. For each day in the series (once at least 730 prior days of history exist), the app
-  fits an *expanding-window* regression using only data up to and including that day, computes that day's
-  residual against its own contemporaneous fit, and only then moves the window forward one day and
-  repeats. The percentile bands are built from that whole population of "was this day's fit doing well by
-  the standards known at the time" residuals. It costs more compute (an O(1)-updatable running-sums
-  approach keeps a full historical refit affordable) but it means the bands reflect what an observer living
-  through each day actually could have known, not information from years in their future.
+  to in January 2025: each day is compared only against the trend as it was fitted using data available up
+  to that day (once at least 730 prior days exist, via an O(1)-updatable expanding-window regression) -
+  what the model would actually have said at the time, with no hindsight. The extreme percentiles,
+  especially the upper ones, come out tighter.
+
+Practical effect on the projections: `fullSample` paints a **wider** funnel around the trend (more
+optimistic ceilings, more pessimistic floors); `pointInTime` paints a **narrower, more conservative**
+funnel. Neither is a prediction - the bands describe how far price has historically wandered from trend,
+nothing more.
+
+Alongside the chart, a collapsible **year-end model table** lists every calendar year from 2010 through the
+configured projection end year: the actual stored closing price where one exists (the current year is
+marked as still in progress), next to the current fit's trend and default four percentile lines at that
+year's December 31st - computed client-side from the same `(a, n, bandOffsets)` the chart uses, so the
+whole table shifts in step with every refit. Years past ~2040 are muted in the table for the same
+validity-horizon reason the chart hatches them. The main chart itself is bigger by default (a
+viewport-responsive height and a wider page container on large screens) to give the fuller band fan room to
+breathe.
 
 ## Data sources
 

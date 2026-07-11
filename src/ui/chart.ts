@@ -14,8 +14,9 @@
 // What the client computes locally (server sends only params + daily prices):
 //   trend price at day t:  10 ^ (a + n*log10(t))            [t = days since genesis]
 //   band price k:          10 ^ (a + n*log10(t) + offset_k) [offset in log10 space]
-// The trend and up to four VISIBLE percentile pairs (50/67/95/99%) are re-sampled
-// at ~2px resolution across the FULL domain (data start -> Dec 31 of
+// The trend and every VISIBLE percentile line (up to eleven individually-toggled
+// lines: 0.5/2.5/10/16.5/25/50/75/83.5/90/97.5/99.5%, the 50% median dashed) are
+// re-sampled at ~2px resolution across the FULL domain (data start -> Dec 31 of
 // projectionEndYear) so the curves stay smooth in any x/y mode and under any zoom.
 //
 // Marker: PLCHART_ENGINE
@@ -33,10 +34,8 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     price: "#42A04C",          // BTC price line
     priceDim: "rgba(66,160,76,0.55)",
     trend: "#ECECEC",          // power-regression trend
-    outer: "#F44336",          // p97.5 / p2.5 bands (red, dotted)
-    inner: "#03A9F4",          // p83.5 / p16.5 bands (blue, dotted)
-    outerFill: "rgba(244,67,54,0.06)",
-    innerFill: "rgba(3,169,244,0.06)",
+    outer: "#F44336",          // deviation colour when above trend (red)
+    inner: "#03A9F4",          // deviation colour when below trend (blue)
     grid: "rgba(255,255,255,0.055)",
     gridStrong: "rgba(255,255,255,0.11)",
     axis: "#8a99ad",
@@ -61,16 +60,34 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-  // The four dotted percentile pairs (v0.1.1). Cool -> hot = close -> extreme.
-  // Each pair reads two offsets off model.off by name; the 50% and 99% pairs
-  // (p25/p75, p005/p995) are ABSENT from models fitted before v0.1.1, so every
-  // consumer guards on pairPresent() and simply skips a pair whose keys are gone.
-  // key matches the legend chip ids/prefs; fill opacities grade outermost-faintest.
-  var BAND_PAIRS = [
-    { key: "50", lo: "p25",  hi: "p75",  color: "#26A69A", fill: "rgba(38,166,154,0.09)",  label: "50%" },
-    { key: "67", lo: "p165", hi: "p835", color: "#03A9F4", fill: "rgba(3,169,244,0.07)",   label: "67%" },
-    { key: "95", lo: "p025", hi: "p975", color: "#F44336", fill: "rgba(244,67,54,0.05)",   label: "95%" },
-    { key: "99", lo: "p005", hi: "p995", color: "#AB47BC", fill: "rgba(171,71,188,0.035)", label: "99%" }
+  // The eleven individually-toggled percentile lines (v0.1.2). Each reads ONE
+  // offset off model.off by name and is labelled by its percentile. The 50%
+  // median is DASHED gray; every other percentile is dotted. "off" doubles as the
+  // legend/pref key. Lines whose offset key is absent (fits made before that
+  // percentile existed) no-op, so every consumer guards on linePresent().
+  var BAND_LINES = [
+    { off: "p995", pct: "99.5%", color: "#AB47BC", dash: [2, 3], def: false },
+    { off: "p975", pct: "97.5%", color: "#F44336", dash: [2, 3], def: true },
+    { off: "p90",  pct: "90%",   color: "#FF9800", dash: [2, 3], def: false },
+    { off: "p835", pct: "83.5%", color: "#03A9F4", dash: [2, 3], def: true },
+    { off: "p75",  pct: "75%",   color: "#26A69A", dash: [2, 3], def: false },
+    { off: "p50",  pct: "50%",   color: "#9E9E9E", dash: [6, 4], def: false },
+    { off: "p25",  pct: "25%",   color: "#26A69A", dash: [2, 3], def: false },
+    { off: "p165", pct: "16.5%", color: "#03A9F4", dash: [2, 3], def: true },
+    { off: "p10",  pct: "10%",   color: "#FF9800", dash: [2, 3], def: false },
+    { off: "p025", pct: "2.5%",  color: "#F44336", dash: [2, 3], def: true },
+    { off: "p005", pct: "0.5%",  color: "#AB47BC", dash: [2, 3], def: false }
+  ];
+
+  // Symmetric same-colour percentile pairs (outermost first). Band-fill shades
+  // the region between a pair's two lines, but ONLY when BOTH lines are visible.
+  // The 50% median is a lone line and has no fill. Opacities grade outermost-faintest.
+  var FILL_PAIRS = [
+    { lo: "p005", hi: "p995", fill: "rgba(171,71,188,0.035)" },
+    { lo: "p025", hi: "p975", fill: "rgba(244,67,54,0.05)" },
+    { lo: "p10",  hi: "p90",  fill: "rgba(255,152,0,0.055)" },
+    { lo: "p165", hi: "p835", fill: "rgba(3,169,244,0.07)" },
+    { lo: "p25",  hi: "p75",  fill: "rgba(38,166,154,0.09)" }
   ];
 
   // ---- math helpers -------------------------------------------------------
@@ -82,13 +99,15 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   // ---- controller state ---------------------------------------------------
   var els = null;            // { main, mctx, osc, octx, tip, wrap, oscWrap }
-  var model = null;          // { a, n, off:{p005,p025,p165,p25,p75,p835,p975,p995}, projEnd, caution, bandMode }
+  var model = null;          // { a, n, off:{p005..p995}, projEnd, caution, bandMode }
   var prices = [];           // [{ t:ms, v:usd, flag:0|1 }] sorted by t
   var priceStart = null, priceEnd = null, provisional = null;
   var spot = null;           // { usd, at } — optional marker at today
-  // prefs.bands maps a BAND_PAIRS key ("50"/"67"/"95"/"99") -> shown boolean (default all on).
+  // prefs.bands maps each BAND_LINES "off" key -> shown boolean. Defaults mirror
+  // the per-line "def" flags: the classic four (2.5/16.5/83.5/97.5) on, the rest off.
   var prefs = { xMode: "date", yMode: "log", bandFill: false, halvings: true, oscillator: true, preset: "full",
-                bands: { "50": true, "67": true, "95": true, "99": true } };
+                bands: { p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+                         p75: false, p835: true, p90: false, p975: true, p995: false } };
   var fullMin = Date.UTC(2010, 6, 18), fullMax = Date.UTC(2045, 11, 31);
   var view = { min: fullMin, max: fullMax };   // visible time window (ms)
   var todayMs = utcMidnight(Date.now());
@@ -145,7 +164,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   //  - "date"    : linear in UTC milliseconds.
   //  - "log-days": linear in log10(days-since-genesis); the same time window is
   //                converted to its day-count endpoints and mapped on a log axis.
-  // Y: "log" (linear in log10 price) or "linear".
+  // Y: "log" (default) or "linear".
   function xToPx(ms) {
     if (prefs.xMode === "logDays") {
       var lo = log10(daysCont(view.min)), hi = log10(daysCont(view.max));
@@ -180,33 +199,33 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function trendAt(ms) { return Math.pow(10, trendLogAt(ms)); }
   function bandAt(ms, off) { return Math.pow(10, trendLogAt(ms) + off); }
 
-  // A pair is drawable only when BOTH its offsets exist as finite numbers in the
-  // loaded model (old <v0.1.1 fits lack p005/p25/p75/p995 -> those pairs no-op).
-  function pairPresent(bp) {
+  // A percentile line is present only when its offset exists as a finite number
+  // in the loaded model (older fits lack the newer keys -> those lines no-op).
+  function linePresent(off) {
     if (!model) return false;
-    var lo = model.off[bp.lo], hi = model.off[bp.hi];
-    return typeof lo === "number" && isFinite(lo) && typeof hi === "number" && isFinite(hi);
+    var v = model.off[off];
+    return typeof v === "number" && isFinite(v);
   }
-  // Visible = present AND not toggled off via its legend chip.
-  function pairVisible(bp) { return pairPresent(bp) && prefs.bands[bp.key] !== false; }
+  // Visible = present AND toggled on via its legend chip.
+  function offVisible(off) { return linePresent(off) && prefs.bands[off] === true; }
 
-  // Widest {lo,hi} offset envelope over the visible pairs (falls back to the
-  // widest present pair, then to a flat 0/0). Used to frame the y-axis and the
-  // oscillator so no visible band is ever clipped.
+  // Widest offset envelope over the visible lines (falls back to the widest
+  // present line, then to a flat 0/0). Used to frame the y-axis and the
+  // oscillator so no visible line is ever clipped.
   function outerOffsets() {
-    var lo = Infinity, hi = -Infinity, i, bp;
-    for (i = 0; i < BAND_PAIRS.length; i++) {
-      bp = BAND_PAIRS[i];
-      if (!pairVisible(bp)) continue;
-      if (model.off[bp.lo] < lo) lo = model.off[bp.lo];
-      if (model.off[bp.hi] > hi) hi = model.off[bp.hi];
+    var lo = Infinity, hi = -Infinity, i, v;
+    for (i = 0; i < BAND_LINES.length; i++) {
+      if (!offVisible(BAND_LINES[i].off)) continue;
+      v = model.off[BAND_LINES[i].off];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
     }
     if (!isFinite(lo)) {
-      for (i = 0; i < BAND_PAIRS.length; i++) {
-        bp = BAND_PAIRS[i];
-        if (!pairPresent(bp)) continue;
-        if (model.off[bp.lo] < lo) lo = model.off[bp.lo];
-        if (model.off[bp.hi] > hi) hi = model.off[bp.hi];
+      for (i = 0; i < BAND_LINES.length; i++) {
+        if (!linePresent(BAND_LINES[i].off)) continue;
+        v = model.off[BAND_LINES[i].off];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
       }
     }
     if (!isFinite(lo)) { lo = 0; hi = 0; }
@@ -216,8 +235,8 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   // =========================================================================
   //  AUTOSCALE — choose the price y-domain that fits the current view
   // =========================================================================
-  // Sample the outer bands (p025 low, p975 high) plus any visible price points
-  // across the view, then pad in the active space (log or linear).
+  // Sample the outer offset envelope plus any visible price points across the
+  // view, then pad in the active space (log or linear).
   function autoscaleY() {
     if (!model) { yDom = { min: 1, max: 1e6 }; return; }
     var lo = Infinity, hi = -Infinity, i;
@@ -248,7 +267,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   }
 
   function autoscaleOsc() {
-    // ratio domain wide enough for the visible band multipliers and the data
+    // ratio domain wide enough for the visible line multipliers and the data
     var lo = 0.3, hi = 3;
     if (model) {
       var ob = outerOffsets();
@@ -485,29 +504,32 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     }
   }
 
-  // Each visible pair is two dotted polylines (upper + lower) in the pair colour.
-  // Pairs whose keys are absent (old fits) or toggled off are skipped cleanly.
+  // Each visible percentile line is ONE polyline in its own colour. The 50%
+  // median is drawn dashed; every other percentile is dotted. Lines whose offset
+  // key is absent (old fits) or toggled off via the legend are skipped cleanly.
   function drawBands(ctx) {
     ctx.lineWidth = 1.4;
-    ctx.setLineDash([2, 3]);
-    for (var i = 0; i < BAND_PAIRS.length; i++) {
-      var bp = BAND_PAIRS[i];
-      if (!pairVisible(bp)) continue;
-      var hiOff = model.off[bp.hi], loOff = model.off[bp.lo];
-      ctx.strokeStyle = bp.color;
-      samplePath(ctx, function (ms) { return bandAt(ms, hiOff); }); ctx.stroke();
-      samplePath(ctx, function (ms) { return bandAt(ms, loOff); }); ctx.stroke();
+    for (var i = 0; i < BAND_LINES.length; i++) {
+      var bl = BAND_LINES[i];
+      if (!offVisible(bl.off)) continue;
+      var off = model.off[bl.off];
+      ctx.setLineDash(bl.dash);
+      ctx.strokeStyle = bl.color;
+      // samplePath runs synchronously, so the closed-over off is always current.
+      samplePath(ctx, function (ms) { return bandAt(ms, off); });
+      ctx.stroke();
     }
     ctx.setLineDash([]);
   }
 
-  // Optional translucent fills for the visible pairs (default off), drawn
-  // outermost-first so inner pairs layer on top; opacities grade outermost-faintest.
+  // Optional translucent fills for the visible symmetric pairs (default off),
+  // drawn outermost-first so inner pairs layer on top. A pair fills only when
+  // BOTH of its lines are visible; the lone 50% median never fills.
   function drawBandFills(ctx) {
-    for (var i = BAND_PAIRS.length - 1; i >= 0; i--) {
-      var bp = BAND_PAIRS[i];
-      if (!pairVisible(bp)) continue;
-      fillBetween(ctx, model.off[bp.lo], model.off[bp.hi], bp.fill);
+    for (var i = 0; i < FILL_PAIRS.length; i++) {
+      var fp = FILL_PAIRS[i];
+      if (!offVisible(fp.lo) || !offVisible(fp.hi)) continue;
+      fillBetween(ctx, model.off[fp.lo], model.off[fp.hi], fp.fill);
     }
   }
   function fillBetween(ctx, offLo, offHi, color) {
@@ -668,8 +690,8 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     return (Math.abs(a.t - ms) <= Math.abs(b.t - ms)) ? a : b;
   }
 
-  // Estimate the residual quantile client-side by interpolating the four known
-  // band anchors (offset -> percentile). Below/above the outer bands we ease
+  // Estimate the residual quantile client-side by interpolating the four classic
+  // band anchors (offset -> percentile). Below/above the outer anchors we ease
   // toward 0/100 so the number stays monotone.
   function residualQuantile(resid) {
     var o = model.off;
@@ -704,15 +726,18 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
       rows.push(row("Deviation", (dev >= 0 ? "+" : "") + dev.toFixed(1) + "%", dev >= 0 ? C.outer : C.inner));
       rows.push(row("Quantile", q.toFixed(1) + "%", C.axis));
     }
-    // Visible pairs only: upper edges (widest first), Trend, then lower edges
-    // (closest-to-trend first). Each row is "<pair%> hi|lo : $value".
-    var vis = [], vi;
-    for (vi = 0; vi < BAND_PAIRS.length; vi++) if (pairVisible(BAND_PAIRS[vi])) vis.push(BAND_PAIRS[vi]);
-    var ups = vis.slice().sort(function (a, b) { return model.off[b.hi] - model.off[a.hi]; });
-    for (vi = 0; vi < ups.length; vi++) rows.push(row(ups[vi].label + " hi", fmtUSD(bandAt(ms, model.off[ups[vi].hi])), ups[vi].color));
-    rows.push(row("Trend", fmtUSD(trend), C.trend));
-    var dns = vis.slice().sort(function (a, b) { return model.off[b.lo] - model.off[a.lo]; });
-    for (vi = 0; vi < dns.length; vi++) rows.push(row(dns[vi].label + " lo", fmtUSD(bandAt(ms, model.off[dns[vi].lo])), dns[vi].color));
+    // Every visible percentile line plus the Trend, merged and sorted by dollar
+    // value descending. Each row is labelled by its percentile ("97.5%") or
+    // "Trend" — no hi/lo wording (individual labelled lines since v0.1.2).
+    var items = [], vi;
+    for (vi = 0; vi < BAND_LINES.length; vi++) {
+      var bl = BAND_LINES[vi];
+      if (!offVisible(bl.off)) continue;
+      items.push({ label: bl.pct, val: bandAt(ms, model.off[bl.off]), color: bl.color });
+    }
+    items.push({ label: "Trend", val: trend, color: C.trend });
+    items.sort(function (a, b) { return b.val - a.val; });
+    for (vi = 0; vi < items.length; vi++) rows.push(row(items[vi].label, fmtUSD(items[vi].val), items[vi].color));
 
     els.tip.innerHTML = rows.join("");
     els.tip.style.display = "block";
@@ -740,13 +765,12 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     var W = els.osc.clientWidth, H = els.osc.clientHeight;
     ctx.clearRect(0, 0, W, H);
     if (!model) return;
-    // guide lines: 1.0 plus the multipliers (10^offset) of every VISIBLE pair
+    // guide lines: 1.0 plus the multiplier (10^offset) of every VISIBLE line
     var guides = [{ r: 1, col: "rgba(236,236,236,0.4)", dash: [] }];
-    for (var pi = 0; pi < BAND_PAIRS.length; pi++) {
-      var bp = BAND_PAIRS[pi];
-      if (!pairVisible(bp)) continue;
-      guides.push({ r: Math.pow(10, model.off[bp.hi]), col: bp.color, dash: [2, 3] });
-      guides.push({ r: Math.pow(10, model.off[bp.lo]), col: bp.color, dash: [2, 3] });
+    for (var pi = 0; pi < BAND_LINES.length; pi++) {
+      var bl = BAND_LINES[pi];
+      if (!offVisible(bl.off)) continue;
+      guides.push({ r: Math.pow(10, model.off[bl.off]), col: bl.color, dash: bl.dash });
     }
     for (var g = 0; g < guides.length; g++) {
       var gy = oscToPx(guides[g].r);
@@ -872,13 +896,14 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function setModel(m) {
     if (!m) { model = null; scheduleDraw(); return; }
     var off = m.bandOffsets || {};
-    // Carry all eight offsets; the new-pair keys may be undefined on old fits and
-    // every drawing path guards on pairPresent() before touching them.
+    // Carry all eleven offsets; the newer keys may be undefined on old fits and
+    // every drawing path guards on linePresent() before touching them.
     model = {
       a: m.a, n: m.n,
       off: {
-        p005: off.p005, p025: off.p025, p165: off.p165, p25: off.p25,
-        p75: off.p75, p835: off.p835, p975: off.p975, p995: off.p995
+        p005: off.p005, p025: off.p025, p10: off.p10, p165: off.p165,
+        p25: off.p25, p50: off.p50, p75: off.p75, p835: off.p835,
+        p90: off.p90, p975: off.p975, p995: off.p995
       },
       bandMode: m.bandMode,
       projEnd: (m.projection && m.projection.endYear) || 2045,
@@ -919,7 +944,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     for (var k in next) {
       if (!Object.prototype.hasOwnProperty.call(next, k)) continue;
       if (k === "bands" && next.bands && typeof next.bands === "object") {
-        // merge onto the existing band-visibility map rather than replacing it
+        // merge onto the existing per-line visibility map rather than replacing it
         var nb = {};
         for (var bk in prefs.bands) { if (Object.prototype.hasOwnProperty.call(prefs.bands, bk)) nb[bk] = prefs.bands[bk]; }
         for (var bk2 in next.bands) { if (Object.prototype.hasOwnProperty.call(next.bands, bk2)) nb[bk2] = next.bands[bk2]; }

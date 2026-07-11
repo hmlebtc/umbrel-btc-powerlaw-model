@@ -177,10 +177,13 @@ export function fitOLS(sample: readonly DailyObservation[]): OlsFit {
 const BAND_PCTS = {
   p005: 0.5,
   p025: 2.5,
+  p10: 10,
   p165: 16.5,
   p25: 25,
+  p50: 50,
   p75: 75,
   p835: 83.5,
+  p90: 90,
   p975: 97.5,
   p995: 99.5,
 } as const;
@@ -189,10 +192,13 @@ function offsetsFromResiduals(residuals: readonly number[]): BandOffsets {
   return {
     p005: percentile(residuals, BAND_PCTS.p005),
     p025: percentile(residuals, BAND_PCTS.p025),
+    p10: percentile(residuals, BAND_PCTS.p10),
     p165: percentile(residuals, BAND_PCTS.p165),
     p25: percentile(residuals, BAND_PCTS.p25),
+    p50: percentile(residuals, BAND_PCTS.p50),
     p75: percentile(residuals, BAND_PCTS.p75),
     p835: percentile(residuals, BAND_PCTS.p835),
+    p90: percentile(residuals, BAND_PCTS.p90),
     p975: percentile(residuals, BAND_PCTS.p975),
     p995: percentile(residuals, BAND_PCTS.p995),
   };

@@ -63,19 +63,24 @@ export interface SourceStatus extends SourceHealth {
 export type BandMode = 'pointInTime' | 'fullSample';
 
 /**
- * Residual-percentile offsets (log10 space) added to the trend line. Eight
- * percentiles forming four symmetric pairs: 99% (p005/p995), 95% (p025/p975),
- * 67% (p165/p835) and 50% (p25/p75). p025/p165/p835/p975 keep their original
- * meaning; p005/p25/p75/p995 are a pure v0.1.1 addition. Records persisted before
- * v0.1.1 carry only the original four keys — consumers must guard on presence.
+ * Residual-percentile offsets (log10 space) added to the trend line. Eleven
+ * percentiles, drawn as individual labelled lines since v0.1.2:
+ * 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5. p025/p165/p835/p975
+ * keep their original meaning; p005/p25/p75/p995 were added in v0.1.1; p10/p50/p90
+ * are a pure v0.1.2 addition. Records persisted before v0.1.2 carry only the eight
+ * v0.1.1 keys (and pre-v0.1.1 records only the original four) — consumers must
+ * guard on presence and treat absent keys as "not available until the next refit".
  */
 export interface BandOffsets {
   p005: number;
   p025: number;
+  p10: number;
   p165: number;
   p25: number;
+  p50: number;
   p75: number;
   p835: number;
+  p90: number;
   p975: number;
   p995: number;
 }

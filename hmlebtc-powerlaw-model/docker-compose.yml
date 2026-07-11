@@ -30,7 +30,7 @@ services:
   web:
     # Pin the exact released version - never `:latest`, never `v`-prefixed.
     # Bump in lockstep with umbrel-app.yml `version:` on every release.
-    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.1
+    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.2
     restart: on-failure
     stop_grace_period: 30s
     volumes:

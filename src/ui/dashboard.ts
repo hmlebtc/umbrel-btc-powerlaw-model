@@ -111,7 +111,7 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .init-card p { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; }
   .init-row { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
 
-  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; width: 100%; }
+  main { max-width: 1440px; margin: 0 auto; padding: 20px 16px 40px; width: 100%; }
 
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
   .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -137,10 +137,12 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .pill-btn:hover { color: var(--text); border-color: var(--border2); }
   .pill-on { background: rgba(247,147,26,0.16); border-color: rgba(247,147,26,0.5); color: var(--btc); font-weight: 600; }
 
-  #chartWrap { position: relative; width: 100%; height: 460px; }
+  /* Bigger chart (v0.1.2): responsive height, resized by the engine on window resize */
+  #chartCard { padding: 14px; }
+  #chartWrap { position: relative; width: 100%; height: clamp(460px, 62vh, 780px); }
   #chartCanvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
-  #oscWrap { position: relative; width: 100%; height: 132px; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
-  #oscCanvas { width: 100%; height: 126px; display: block; }
+  #oscWrap { position: relative; width: 100%; height: 176px; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+  #oscCanvas { width: 100%; height: 170px; display: block; }
   .osc-title { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
   .band-note { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
 
@@ -149,15 +151,23 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .pltip-k { color: var(--muted); }
   .pltip-v { font-variant-numeric: tabular-nums; font-weight: 600; }
 
-  /* Chart legend (v0.1.1): Price/Trend indicators + click-toggle band chips */
+  /* Chart legend (v0.1.2): Price/Trend indicators + per-percentile toggle chips
+     plus a "More bands" expander that reveals the non-default percentile row. */
   .chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; margin-bottom: 12px; }
   .lg { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
   .lg-sw { width: 15px; height: 3px; border-radius: 2px; flex: none; }
-  button.lg-band { font: inherit; font-size: 12px; color: var(--text); background: none; border: 1px solid transparent; border-radius: 8px; padding: 3px 8px; cursor: pointer; }
+  .lg-sw-dash { background-image: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
+  button.lg-band { font: inherit; font-size: 12px; color: var(--text); background: none; border: 1px solid transparent; border-radius: 8px; padding: 3px 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
   button.lg-band:hover { border-color: var(--border2); }
   button.lg-band:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   .lg-band[aria-pressed="false"] { opacity: .42; }
   .lg-band[aria-pressed="false"] .lg-sw { opacity: .5; }
+  .lg-band:disabled { opacity: .3; cursor: default; }
+  button.lg-more { font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); background: none; border: 1px solid var(--border2); border-radius: 8px; padding: 3px 9px; cursor: pointer; }
+  button.lg-more:hover { color: var(--text); border-color: var(--blue); }
+  button.lg-more:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .lg-more-chev { display: inline-block; }
+  .lg-more-row { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; padding-top: 2px; }
 
   /* Info ⓘ popover system (v0.1.1) */
   .infobtn { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; margin-left: 5px; border-radius: 50%; border: 1px solid var(--border2); background: var(--card2); color: var(--muted); font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700; font-size: 10px; line-height: 1; cursor: pointer; vertical-align: middle; flex: none; }
@@ -193,6 +203,20 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .fchip-ok { background: var(--green-soft); color: var(--good); }
   .fchip-bad { background: var(--red-soft); color: var(--bad); }
   .fchip-unk { background: var(--gray-soft); color: var(--muted); }
+
+  /* Year-end model table (v0.1.2): sticky-header, scrollable body */
+  .ytable-scroll { max-height: 380px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table.ytable { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .ytable th, .ytable td { padding: 6px 12px; text-align: right; white-space: nowrap; }
+  .ytable th:first-child, .ytable td:first-child { text-align: left; }
+  .ytable thead th { position: sticky; top: 0; z-index: 1; background: var(--card2); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; border-bottom: 1px solid var(--border2); }
+  .ytable tbody td { border-bottom: 1px solid var(--border); }
+  .ytable tbody tr:last-child td { border-bottom: none; }
+  .yt-now { background: rgba(247,147,26,0.12); }
+  .yt-now td { font-weight: 600; }
+  .yt-prog { color: var(--btc); }
+  .yt-beyond td { color: var(--faint); }
+  .ytable-foot { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
 
   .srcchips { display: flex; flex-wrap: wrap; gap: 8px; }
   .srcchip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--card2); color: var(--text); font-size: 12px; cursor: pointer; }
@@ -239,7 +263,7 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .form-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
   .src-note { font-size: 12px; color: var(--faint); margin: 4px 0 8px; }
 
-  footer { max-width: 1100px; margin: 0 auto; padding: 8px 16px 34px; color: var(--faint); font-size: 12px; text-align: center; }
+  footer { max-width: 1440px; margin: 0 auto; padding: 8px 16px 34px; color: var(--faint); font-size: 12px; text-align: center; }
   footer .disc { color: var(--muted); margin-top: 3px; }
 
   .toasts { position: fixed; right: 16px; bottom: 16px; z-index: 100; display: flex; flex-direction: column; gap: 8px; max-width: min(380px, calc(100vw - 32px)); }
@@ -324,7 +348,7 @@ const PAGE_BODY: string = String.raw`</span>
     </div>
     <div class="chart-explain" id="explainPanel" style="display:none">
       <p>The green line is Bitcoin's actual daily price; the ring at the end is the live price for today, which isn't final until the day closes. The white line is the power-law trend fitted to the entire history - it is refit from scratch at every update, so it can shift slightly as new data arrives.</p>
-      <p>The dotted bands show where price has historically sat relative to trend: half of all days fall inside the teal pair, two-thirds inside the blue, 95% inside the red, and 99% inside the purple. They are percentiles of the model's own historical misses, not statistical guarantees. Click a legend chip to show or hide a pair.</p>
+      <p>The dotted lines are percentiles of the model's own history: price has historically closed below the 97.5% line on 97.5% of all days, below the 16.5% line on only 16.5% of days, and so on. The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set; open 'More bands' in the legend to add others, including the 50% median. They are descriptions of the past, not statistical guarantees about the future.</p>
       <p>Left of the 'today' line is history; right of it is the same formula extended forward. The hatched area past ~2040 is where the model's own authors say it should not be trusted. Halving lines mark Bitcoin's supply-cut events (dashed ones are estimates).</p>
       <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to zoom, scroll to zoom at the cursor, double-click to reset.</p>
     </div>
@@ -354,13 +378,23 @@ const PAGE_BODY: string = String.raw`</span>
         <button class="pill-btn" id="tgOsc" type="button" aria-pressed="true">Oscillator</button>
       </div>
     </div>
-    <div class="chart-legend" id="chartLegend" role="group" aria-label="Chart series legend and band toggles">
+    <div class="chart-legend" id="chartLegend" role="group" aria-label="Chart series legend and percentile line toggles">
       <span class="lg"><span class="lg-sw" style="background:#42a04c"></span>Price</span>
       <span class="lg"><span class="lg-sw" style="background:#ececec"></span>Trend</span>
-      <button class="lg-band" type="button" id="lg_50" data-band="50" aria-pressed="true" aria-label="Toggle the 50% band"><span class="lg-sw" style="background:#26a69a"></span>50%</button>
-      <button class="lg-band" type="button" id="lg_67" data-band="67" aria-pressed="true" aria-label="Toggle the 67% band"><span class="lg-sw" style="background:#03a9f4"></span>67%</button>
-      <button class="lg-band" type="button" id="lg_95" data-band="95" aria-pressed="true" aria-label="Toggle the 95% band"><span class="lg-sw" style="background:#f44336"></span>95%</button>
-      <button class="lg-band" type="button" id="lg_99" data-band="99" aria-pressed="true" aria-label="Toggle the 99% band"><span class="lg-sw" style="background:#ab47bc"></span>99%</button>
+      <button class="lg-band" type="button" id="lg_p025" data-band="p025" aria-pressed="true" aria-label="Toggle the 2.5% line"><span class="lg-sw" style="background:#f44336"></span>2.5%</button>
+      <button class="lg-band" type="button" id="lg_p165" data-band="p165" aria-pressed="true" aria-label="Toggle the 16.5% line"><span class="lg-sw" style="background:#03a9f4"></span>16.5%</button>
+      <button class="lg-band" type="button" id="lg_p835" data-band="p835" aria-pressed="true" aria-label="Toggle the 83.5% line"><span class="lg-sw" style="background:#03a9f4"></span>83.5%</button>
+      <button class="lg-band" type="button" id="lg_p975" data-band="p975" aria-pressed="true" aria-label="Toggle the 97.5% line"><span class="lg-sw" style="background:#f44336"></span>97.5%</button>
+      <button class="lg-more" type="button" id="moreBandsToggle" aria-expanded="false" aria-controls="moreBandsRow">More bands <span class="lg-more-chev" id="moreBandsChev">&#9662;</span></button>
+      <span class="lg-more-row" id="moreBandsRow" style="display:none">
+        <button class="lg-band" type="button" id="lg_p005" data-band="p005" aria-pressed="false" aria-label="Toggle the 0.5% line"><span class="lg-sw" style="background:#ab47bc"></span>0.5%</button>
+        <button class="lg-band" type="button" id="lg_p10" data-band="p10" aria-pressed="false" aria-label="Toggle the 10% line"><span class="lg-sw" style="background:#ff9800"></span>10%</button>
+        <button class="lg-band" type="button" id="lg_p25" data-band="p25" aria-pressed="false" aria-label="Toggle the 25% line"><span class="lg-sw" style="background:#26a69a"></span>25%</button>
+        <button class="lg-band" type="button" id="lg_p50" data-band="p50" aria-pressed="false" aria-label="Toggle the 50% median line"><span class="lg-sw lg-sw-dash" style="background:#9e9e9e"></span>50%</button>
+        <button class="lg-band" type="button" id="lg_p75" data-band="p75" aria-pressed="false" aria-label="Toggle the 75% line"><span class="lg-sw" style="background:#26a69a"></span>75%</button>
+        <button class="lg-band" type="button" id="lg_p90" data-band="p90" aria-pressed="false" aria-label="Toggle the 90% line"><span class="lg-sw" style="background:#ff9800"></span>90%</button>
+        <button class="lg-band" type="button" id="lg_p995" data-band="p995" aria-pressed="false" aria-label="Toggle the 99.5% line"><span class="lg-sw" style="background:#ab47bc"></span>99.5%</button>
+      </span>
     </div>
     <div id="chartWrap">
       <canvas id="chartCanvas" role="img" aria-label="Bitcoin price with power-law trend and percentile bands"></canvas>
@@ -382,6 +416,35 @@ const PAGE_BODY: string = String.raw`</span>
       <div class="mstile hl"><div class="l">$1M crossing</div><div class="v" id="ms_1m">&mdash;</div><div class="s" id="ms_1m_sub"></div></div>
     </div>
     <div class="fchips" id="falsifiability"></div>
+  </section>
+
+  <section class="card" id="yearTableCard">
+    <div class="card-head">
+      <button class="settings-toggle" id="yearTableToggle" type="button" aria-expanded="true" aria-controls="yearTableBody">
+        <span id="yearTableChevron">&#9662;</span> Year-end model table
+      </button>
+      <button class="infobtn" type="button" data-help="yearEndTable" aria-label="About: Year-end model table" aria-expanded="false">i</button>
+      <span class="hint">Dec 31 actual close vs. the current fit</span>
+    </div>
+    <div id="yearTableBody">
+      <div class="ytable-scroll">
+        <table class="ytable">
+          <thead>
+            <tr>
+              <th scope="col">Year</th>
+              <th scope="col">Actual close</th>
+              <th scope="col">2.5%</th>
+              <th scope="col">16.5%</th>
+              <th scope="col">Trend</th>
+              <th scope="col">83.5%</th>
+              <th scope="col">97.5%</th>
+            </tr>
+          </thead>
+          <tbody id="yearTableRows"></tbody>
+        </table>
+      </div>
+      <div class="ytable-foot" id="yearTableFoot" style="display:none">Years beyond ~2040 exceed the model author's stated validity horizon.</div>
+    </div>
   </section>
 
   <section class="card" id="sourcesCard">

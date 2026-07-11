@@ -143,11 +143,12 @@ test('computeBandOffsets: pointInTime degrades to fullSample when sample is shor
 });
 
 // ---------------------------------------------------------------------------
-// v0.1.1 band fan: eight percentiles = four symmetric pairs (spec 11.1).
-// 99% (p005/p995), 95% (p025/p975), 67% (p165/p835), 50% (p25/p75).
+// v0.1.2 band fan: eleven individually-labelled percentile lines (spec 12.1).
+// 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5. p10/p50/p90 are the
+// pure v0.1.2 addition over the eight v0.1.1 keys.
 // ---------------------------------------------------------------------------
 
-test('computeBandOffsets: exposes all eight keys, non-decreasing in ascending-p order', () => {
+test('computeBandOffsets: exposes all eleven keys, non-decreasing in ascending-p order', () => {
   const sample = syntheticPowerLaw({
     a: -16.5,
     n: 5.69,
@@ -159,22 +160,25 @@ test('computeBandOffsets: exposes all eight keys, non-decreasing in ascending-p 
   const f = fitOLS(sample);
   const bands = computeBandOffsets(f, sample, 'pointInTime');
 
-  // All four pairs are present (pure addition over the original four keys).
+  // All eleven percentiles are present (pure addition over the v0.1.1 eight keys).
   assert.deepEqual(
     Object.keys(bands).sort(),
-    ['p005', 'p025', 'p165', 'p25', 'p75', 'p835', 'p975', 'p995'].sort(),
+    ['p005', 'p025', 'p10', 'p165', 'p25', 'p50', 'p75', 'p835', 'p90', 'p975', 'p995'].sort(),
   );
 
   // Offsets are monotonically non-decreasing in ascending percentile order:
-  // 0.5 < 2.5 < 16.5 < 25 < 75 < 83.5 < 97.5 < 99.5 — note p25 (25) sits ABOVE
-  // p165 (16.5), so the key order here is deliberately not the numeric key order.
+  // 0.5 < 2.5 < 10 < 16.5 < 25 < 50 < 75 < 83.5 < 90 < 97.5 < 99.5 — the key
+  // order here is deliberately by percentile value, not lexicographic key order.
   const inPOrder = [
     bands.p005,
     bands.p025,
+    bands.p10,
     bands.p165,
     bands.p25,
+    bands.p50,
     bands.p75,
     bands.p835,
+    bands.p90,
     bands.p975,
     bands.p995,
   ];
@@ -184,9 +188,27 @@ test('computeBandOffsets: exposes all eight keys, non-decreasing in ascending-p 
       `not monotone at ${i}: ${inPOrder[i - 1]} -> ${inPOrder[i]}`,
     );
   }
-  // Symmetric noise: the 50% pair straddles zero and the 99% pair is the widest.
+  // Symmetric noise: the inner pair straddles zero and the outer pair is widest.
   assert.ok(bands.p25 < 0 && bands.p75 > 0);
   assert.ok(bands.p005 < bands.p025 && bands.p975 < bands.p995);
+});
+
+test('computeBandOffsets: p50 (median) of symmetric residuals sits ~0', () => {
+  // Zero-mean symmetric Gaussian noise -> the median residual is essentially 0,
+  // and much closer to zero than the inner quartiles bracketing it.
+  const sample = syntheticPowerLaw({
+    a: -16.5,
+    n: 5.69,
+    startT: 1,
+    count: 2500,
+    noiseSigma: 0.15,
+    seed: 42,
+  });
+  const f = fitOLS(sample);
+  const bands = computeBandOffsets(f, sample, 'fullSample');
+  assert.ok(Math.abs(bands.p50) < 0.01, `p50=${bands.p50} not ~0`);
+  // The median is bracketed by the 25%/75% quartiles it lands between.
+  assert.ok(bands.p25 < bands.p50 && bands.p50 < bands.p75);
 });
 
 test('computeBandOffsets: each key maps to its percentile of the banded residual set', () => {
@@ -198,10 +220,13 @@ test('computeBandOffsets: each key maps to its percentile of the banded residual
   const bands = computeBandOffsets(f, sample, 'fullSample');
   assert.equal(bands.p005, percentile(residuals, 0.5));
   assert.equal(bands.p025, percentile(residuals, 2.5));
+  assert.equal(bands.p10, percentile(residuals, 10));
   assert.equal(bands.p165, percentile(residuals, 16.5));
   assert.equal(bands.p25, percentile(residuals, 25));
+  assert.equal(bands.p50, percentile(residuals, 50));
   assert.equal(bands.p75, percentile(residuals, 75));
   assert.equal(bands.p835, percentile(residuals, 83.5));
+  assert.equal(bands.p90, percentile(residuals, 90));
   assert.equal(bands.p975, percentile(residuals, 97.5));
   assert.equal(bands.p995, percentile(residuals, 99.5));
 });

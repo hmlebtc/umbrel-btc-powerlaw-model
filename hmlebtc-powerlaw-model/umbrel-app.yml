@@ -6,7 +6,7 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.1"
+version: "0.1.2"
 tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
@@ -31,6 +31,18 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.1.2 - individual percentile lines and a year-end table.
+
+  The band fan moves from four fixed pairs to eleven individually labeled, individually
+  toggleable percentile lines - 2.5%, 16.5%, 83.5%, and 97.5% shown by default, with a
+  "More bands" legend expander adding 0.5%, 10%, 25%, the 50% median, 75%, 90%, and 99.5%. A new
+  collapsible "Year-end model table" lists every calendar year's actual close next to the fitted
+  trend and default bands, out to whatever projection year is configured. The main chart is
+  bigger by default on wide screens, and the band-mode explainer now spells out in plain English
+  why full-sample paints a wider, more optimistic funnel and point-in-time a narrower, more
+  conservative one. No data or settings migration needed; existing installs pick this up on their
+  next update.
+
   v0.1.1 - explainer tooltips and a richer band fan.
 
   Every readout tile and settings field now has a small (i) button explaining what it means and

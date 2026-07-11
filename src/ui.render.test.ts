@@ -100,11 +100,12 @@ function makeRecordingCtx(): RecordingCtx {
   };
 }
 
-// The four v0.1.1 band-pair colours (cool -> hot = close -> extreme). On the main
-// canvas these appear as strokeStyle ONLY inside drawBands (verified against
-// chart.ts: every other stroke uses a non-band colour), so counting stroke()
-// calls made while a band colour is live counts exactly the dotted band polylines.
-const BAND_COLORS = ["#26A69A", "#03A9F4", "#F44336", "#AB47BC"];
+// The v0.1.2 percentile-line colours (six distinct hues; symmetric percentiles
+// share a hue, and the 50% median is gray). On the main canvas these appear as
+// strokeStyle ONLY inside drawBands (verified against chart.ts: every other
+// stroke uses a non-band colour), so counting stroke() calls made while a band
+// colour is live counts exactly the visible percentile polylines.
+const BAND_COLORS = ["#AB47BC", "#F44336", "#FF9800", "#03A9F4", "#26A69A", "#9E9E9E"];
 function countBandPolylines(ctx: RecordingCtx): number {
   let cur: string | null = null;
   let n = 0;
@@ -302,8 +303,8 @@ test("layout resizes the canvas backing store to clientWidth * dpr", () => {
   assert.equal(h.oscCanvas.width, OSC_W * h.dpr, "osc backing-store width != clientWidth*dpr");
 });
 
-// (3) >500 lineTo across price + trend + 4 bands over the domain -------------
-test("a full frame emits well over 500 lineTo calls (price + trend + 4 bands)", () => {
+// (3) >500 lineTo across price + trend + the 4 default lines over the domain ---
+test("a full frame emits well over 500 lineTo calls (price + trend + 4 default lines)", () => {
   const h = paint();
   const lineTos = h.mainCtx.calls.filter((c) => c.m === "lineTo").length;
   const moveTos = h.mainCtx.calls.filter((c) => c.m === "moveTo").length;
@@ -352,28 +353,47 @@ test("with the oscillator enabled the osc canvas also paints", () => {
   assert.equal(offOscLineTos, 0, "osc drew segments while disabled (" + offOscLineTos + ")");
 });
 
-// (7) v0.1.1: with 8-key offsets and all pairs on, EIGHT dotted band polylines
-//     are drawn and the two NEW pair colours (teal 50%, purple 99%) are used.
-test("8-key offsets with all pairs on draw eight band polylines incl. the new teal/purple", () => {
-  const h = paint(); // default prefs => all four pairs visible; MODEL_PAYLOAD has 8 keys
-  // sanity: the fixture-derived offsets really do carry all eight keys
+// (7a) v0.1.2 defaults: with default prefs only the classic FOUR percentile lines
+//      (2.5/16.5/83.5/97.5%) are visible, so exactly four polylines are drawn.
+test("default prefs draw exactly the four default percentile lines", () => {
+  const h = paint(); // default prefs => only p025/p165/p835/p975 visible
+  const bands = countBandPolylines(h.mainCtx);
+  assert.equal(bands, 4, "expected 4 default band polylines, got " + bands);
+});
+
+// (7b) v0.1.2: with the full 11-key model and EVERY line toggled on, eleven
+//      individual polylines are drawn — including the DASHED 50% median (gray,
+//      setLineDash [6,4], the sole non-dotted percentile).
+test("11-key offsets with all lines on draw eleven polylines incl. the dashed median", () => {
   const offs = BAND_OFFSETS as unknown as Record<string, number>;
-  for (const k of ["p005", "p025", "p165", "p25", "p75", "p835", "p975", "p995"]) {
+  const ALL_KEYS = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+  // sanity: the fixture-derived offsets really do carry all eleven keys
+  for (const k of ALL_KEYS) {
     assert.ok(typeof offs[k] === "number", "fixture bandOffsets missing key " + k);
   }
+  const allOn: Record<string, boolean> = {};
+  for (const k of ALL_KEYS) allOn[k] = true;
+  const h = runPaint({ bands: allOn });
+
   const bands = countBandPolylines(h.mainCtx);
-  assert.equal(bands, 8, "expected 8 dotted band polylines (4 pairs x 2), got " + bands);
+  assert.equal(bands, 11, "expected 11 percentile polylines with every line on, got " + bands);
+
   const strokeColors = new Set(
     h.mainCtx.sets.filter((s) => s.prop === "strokeStyle").map((s) => String(s.value)),
   );
-  assert.ok(strokeColors.has("#26A69A"), "50% pair teal #26A69A never stroked");
-  assert.ok(strokeColors.has("#AB47BC"), "99% pair purple #AB47BC never stroked");
+  assert.ok(strokeColors.has("#9E9E9E"), "50% median gray #9E9E9E never stroked");
+  assert.ok(strokeColors.has("#FF9800"), "10%/90% amber #FF9800 never stroked");
+  // the median is the only DASHED percentile: a setLineDash([6,4]) must be present
+  const dashedMedian = h.mainCtx.calls.some(
+    (c) => c.m === "setLineDash" && JSON.stringify(c.args[0]) === "[6,4]",
+  );
+  assert.ok(dashedMedian, "median line was not drawn dashed (no setLineDash([6,4]))");
 });
 
-// (8) v0.1.1 backward-compat: a model whose bandOffsets predates v0.1.1 (only the
-//     four classic keys) must paint WITHOUT throwing and draw exactly the 4
-//     classic band polylines — the 50%/99% pairs simply no-op on missing keys.
-test("4-key (pre-v0.1.1) offsets draw exactly four band lines and never throw", () => {
+// (8) backward-compat: a model whose bandOffsets predates v0.1.2 (only the four
+//     classic keys) must paint WITHOUT throwing and draw exactly those four lines
+//     — the lines whose offset keys are absent simply no-op.
+test("4-key (legacy) offsets draw exactly four band lines and never throw", () => {
   const fourKeyOffsets = {
     p025: BAND_OFFSETS.p025,
     p165: BAND_OFFSETS.p165,
@@ -389,14 +409,14 @@ test("4-key (pre-v0.1.1) offsets draw exactly four band lines and never throw", 
   } catch (e) {
     err = e;
   }
-  assert.equal(err, null, "painting a 4-key (old) model threw: " + String(err));
+  assert.equal(err, null, "painting a 4-key (legacy) model threw: " + String(err));
   assert.ok(res, "no paint result for the 4-key model");
   const bands = countBandPolylines((res as PaintResult).mainCtx);
   assert.equal(bands, 4, "expected exactly 4 band polylines for a 4-key model, got " + bands);
-  // the two new-pair colours must be absent when their keys are missing
+  // colours belonging only to absent keys must never be stroked
   const strokeColors = new Set(
     (res as PaintResult).mainCtx.sets.filter((s) => s.prop === "strokeStyle").map((s) => String(s.value)),
   );
-  assert.ok(!strokeColors.has("#26A69A"), "50% teal drew despite missing p25/p75 keys");
-  assert.ok(!strokeColors.has("#AB47BC"), "99% purple drew despite missing p005/p995 keys");
+  assert.ok(!strokeColors.has("#26A69A"), "25%/75% teal drew despite missing p25/p75 keys");
+  assert.ok(!strokeColors.has("#9E9E9E"), "median gray drew despite missing p50 key");
 });

@@ -133,13 +133,76 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   // =========================================================================
   var PREF_KEY = "bpl.prefs.v1";
   var RANGES = { "full": 1, "history": 1, "4y": 1, "1y": 1, "6m": 1 };
-  var prefs = loadPrefs();
 
-  // band-visibility keys mirror the chart engine's BAND_PAIRS keys; default all on.
-  var BAND_KEYS = ["50", "67", "95", "99"];
+  // Per-percentile band-visibility keys mirror the chart engine's BAND_LINES
+  // "off" keys (v0.1.2 individual lines). Defaults reproduce the classic four:
+  // 2.5/16.5/83.5/97.5% on, every other percentile off.
+  var BAND_KEYS = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+  function defaultBands() {
+    return { p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+             p75: false, p835: true, p90: false, p975: true, p995: false };
+  }
+  // v0.1.1 -> v0.1.2 migration (spec 12.1, REVISED after Fable review). The old
+  // prefs.bands used pair keys {50,67,95,99}. ONLY the classic-four pairs carry
+  // over onto their two symmetric per-line keys; the 50% and 99% pairs are
+  // deliberately dropped so the seven extras stay OFF by default (they are one
+  // click away under "More bands"). The migrated map is persisted immediately by
+  // the caller so the legacy pair shape never survives to a second load.
+  var LEGACY_KEYS = ["50", "67", "95", "99"];
+  var LEGACY_CARRY = {
+    "95": ["p025", "p975"],
+    "67": ["p165", "p835"]
+  };
+  // Set true by loadPrefs when it migrated a legacy pair-shape bands map, so boot
+  // can persist the new shape exactly once (see the savePrefs call after loadPrefs).
+  var prefsMigrated = false;
+  // Robust legacy detection (spec 12.1): the stored bands map is the v0.1.1 pair
+  // shape iff it carries ANY of the pair keys 50/67/95/99 and NONE of the v0.1.2
+  // per-line p* keys. A mixed object is treated as new-shape (not migrated).
+  function isLegacyBands(stored) {
+    if (!stored || typeof stored !== "object") return false;
+    var i, sawLegacy = false;
+    for (i = 0; i < LEGACY_KEYS.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(stored, LEGACY_KEYS[i])) { sawLegacy = true; break; }
+    }
+    if (!sawLegacy) return false;
+    for (i = 0; i < BAND_KEYS.length; i++) {
+      if (Object.prototype.hasOwnProperty.call(stored, BAND_KEYS[i])) return false;
+    }
+    return true;
+  }
+  // Reconcile a stored bands object onto the v0.1.2 per-line defaults:
+  //   - legacy pair shape -> carry ONLY 95 -> p025/p975 and 67 -> p165/p835; the
+  //     seven extras (incl. the old 50/99 pairs) stay at their default (off);
+  //   - new per-line shape -> explicit boolean keys win over the defaults;
+  //   - anything else (empty/corrupt) -> full new defaults (classic four on).
+  function migrateBands(stored) {
+    var b = defaultBands();
+    if (!stored || typeof stored !== "object") return b;
+    if (isLegacyBands(stored)) {
+      for (var pair in LEGACY_CARRY) {
+        if (!Object.prototype.hasOwnProperty.call(LEGACY_CARRY, pair)) continue;
+        if (typeof stored[pair] !== "boolean") continue;
+        var keys = LEGACY_CARRY[pair];
+        b[keys[0]] = stored[pair];
+        b[keys[1]] = stored[pair];
+      }
+      return b;
+    }
+    for (var i = 0; i < BAND_KEYS.length; i++) {
+      var bk = BAND_KEYS[i];
+      if (typeof stored[bk] === "boolean") b[bk] = stored[bk];
+    }
+    return b;
+  }
+  var prefs = loadPrefs();
+  // Persist a just-migrated legacy prefs immediately (spec 12.1) so the old pair
+  // shape can never survive to a second load and re-run the migration.
+  if (prefsMigrated) savePrefs();
+
   function loadPrefs() {
     var d = { xMode: "date", yMode: "log", bandFill: false, halvings: true, oscillator: true, preset: "full",
-              bands: { "50": true, "67": true, "95": true, "99": true }, explain: false };
+              bands: defaultBands(), explain: false, moreBands: false };
     try {
       var raw = window.localStorage.getItem(PREF_KEY);
       if (raw) {
@@ -151,11 +214,10 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
         if (typeof p.oscillator === "boolean") d.oscillator = p.oscillator;
         if (RANGES[p.preset]) d.preset = p.preset;
         if (typeof p.explain === "boolean") d.explain = p.explain;
+        if (typeof p.moreBands === "boolean") d.moreBands = p.moreBands;
         if (p.bands && typeof p.bands === "object") {
-          for (var i = 0; i < BAND_KEYS.length; i++) {
-            var bk = BAND_KEYS[i];
-            if (typeof p.bands[bk] === "boolean") d.bands[bk] = p.bands[bk];
-          }
+          if (isLegacyBands(p.bands)) prefsMigrated = true;
+          d.bands = migrateBands(p.bands);
         }
       }
     } catch (e) { /* ignore corrupt prefs */ }
@@ -169,6 +231,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   //  STATE
   // =========================================================================
   var lastStatus = null, lastModel = null, lastFittedAt = null;
+  var priceSeries = [];   // [[ 'YYYY-MM-DD', usd, flag ], ...] held for the year-end table
   var nextRefitAt = null;
   var jobTimer = null, jobActive = false;
   var userRefitPending = false;
@@ -210,19 +273,21 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     });
     markActiveMode(); markActiveRange(); markToggles();
     show("oscWrap", prefs.oscillator);
-    wireLegend(); wireExplain();
+    wireLegend(); wireMoreBands(); wireExplain();
   }
 
-  // ---- band legend chips (v0.1.1) -----------------------------------------
-  // Each of the four band chips click-toggles its pair's visibility, persisted in
-  // prefs.bands and pushed to the chart via setPrefs({bands:{...}}). Price/Trend
-  // are static indicators. aria-pressed + a muted class reflect the on/off state.
+  // ---- band legend chips (v0.1.2) -----------------------------------------
+  // Each percentile chip click-toggles its single line's visibility, persisted
+  // per-percentile in prefs.bands and pushed to the chart via setPrefs({bands}).
+  // Price/Trend are static indicators. aria-pressed reflects the on/off state.
+  // Chips whose offset key is absent from the current fit render disabled.
   function wireLegend() {
     for (var i = 0; i < BAND_KEYS.length; i++) {
       (function (key) {
         var el = $("lg_" + key);
         if (!el) return;
         el.addEventListener("click", function () {
+          if (el.disabled) return;
           prefs.bands[key] = !prefs.bands[key];
           savePrefs();
           setLegendChip(key);
@@ -237,7 +302,41 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   function markLegend() { for (var i = 0; i < BAND_KEYS.length; i++) setLegendChip(BAND_KEYS[i]); }
   function setLegendChip(key) {
     var el = $("lg_" + key);
-    if (el) el.setAttribute("aria-pressed", prefs.bands[key] !== false ? "true" : "false");
+    if (el) el.setAttribute("aria-pressed", prefs.bands[key] === true ? "true" : "false");
+  }
+  // Disable chips whose offset key the current model lacks (pre-0.1.2 fits), with
+  // the spec title; re-enable once a fresh fit supplies the key.
+  function updateLegendAvailability(m) {
+    var offs = (m && m.bandOffsets) || {};
+    for (var i = 0; i < BAND_KEYS.length; i++) {
+      var key = BAND_KEYS[i], el = $("lg_" + key);
+      if (!el) continue;
+      var present = typeof offs[key] === "number" && isFinite(offs[key]);
+      el.disabled = !present;
+      if (present) el.removeAttribute("title");
+      else el.title = "available after the next model update";
+    }
+  }
+
+  // ---- "More bands" expander (v0.1.2) -------------------------------------
+  // Reveals the second chip row (the non-default percentiles incl. the 50%
+  // median). Open/closed state persisted in prefs.moreBands (default collapsed).
+  function wireMoreBands() {
+    var btn = $("moreBandsToggle");
+    if (!btn) return;
+    applyMoreBands();
+    btn.addEventListener("click", function () {
+      prefs.moreBands = !prefs.moreBands;
+      savePrefs();
+      applyMoreBands();
+    });
+  }
+  function applyMoreBands() {
+    var open = !!prefs.moreBands;
+    show("moreBandsRow", open);
+    var btn = $("moreBandsToggle");
+    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+    setText("moreBandsChev", open ? "▴" : "▾");
   }
 
   // ---- chart explainer panel (v0.1.1) -------------------------------------
@@ -460,12 +559,18 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     if (!res.ok) { return false; }
     lastModel = res.data;
     renderModel(res.data);
+    updateLegendAvailability(res.data);
     if (chartReady) window.PLChart.setModel(res.data);
+    renderYearTable();
     return true;
   }
   async function loadPrices() {
     var res = await apiGet("/api/prices?maxPoints=8000");
-    if (res.ok && chartReady) window.PLChart.setPrices(res.data);
+    if (res.ok) {
+      priceSeries = (res.data && res.data.points) || [];
+      renderYearTable();
+      if (chartReady) window.PLChart.setPrices(res.data);
+    }
   }
 
   function renderModel(m) {
@@ -477,6 +582,98 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     setText("bandModeNote", m.bandMode === "fullSample" ? "bands: full-sample percentiles" : "bands: point-in-time percentiles");
     renderMilestones(m.milestones || {});
     renderFalsifiability(m.falsifiability || {});
+  }
+
+  // =========================================================================
+  //  YEAR-END MODEL TABLE (v0.1.2, spec 12.2 — client-side, no API change)
+  // =========================================================================
+  // One row per calendar year 2010..projectionEndYear. "Actual close" is the last
+  // stored price of that year (from /api/prices, which the app already holds);
+  // the model columns (2.5/16.5/Trend/83.5/97.5%) are computed client-side from
+  // (a, n, bandOffsets) at t(Dec 31). Columns are FIXED to the default percentile
+  // set regardless of the chart legend. Recomputed on model/prices refresh and
+  // when projectionEndYear changes.
+  var YEAR_GENESIS = Date.UTC(2009, 0, 3);
+  function tDays(ms) { var d = Math.floor((ms - YEAR_GENESIS) / DAY); return d < 1 ? 1 : d; }
+  function trendLogAtYear(m, ms) { return m.a + m.n * (Math.log(tDays(ms)) / Math.LN10); }
+  function modelUsdAt(m, ms, off) {
+    var lg = trendLogAtYear(m, ms) + (off || 0);
+    return Math.pow(10, lg);
+  }
+  // Latest calendar year we have any real (non-provisional) or provisional close for.
+  function currentUtcYear() { return new Date().getUTCFullYear(); }
+  // The last stored price whose date falls in year Y, plus whether it is provisional.
+  function lastCloseOfYear(y) {
+    var best = null;
+    for (var i = 0; i < priceSeries.length; i++) {
+      var row = priceSeries[i];
+      var ys = parseInt(String(row[0]).slice(0, 4), 10);
+      if (ys !== y) continue;
+      if (best === null || String(row[0]) > String(best[0])) best = row;
+    }
+    return best; // [date, usd, flag] or null
+  }
+  function projEndYear() {
+    // Follow the live setting so the row range extends immediately when the user
+    // changes projectionEndYear (before the next refit rewrites model.projection).
+    if (settingsCache && settingsCache.projectionEndYear) return settingsCache.projectionEndYear;
+    if (lastModel && lastModel.projection && lastModel.projection.endYear) return lastModel.projection.endYear;
+    return 2045;
+  }
+  function cautionYear() {
+    if (lastModel && lastModel.projection && lastModel.projection.cautionAfterYear) return lastModel.projection.cautionAfterYear;
+    return 2040;
+  }
+  function renderYearTable() {
+    var body = $("yearTableRows");
+    if (!body) return;
+    var m = lastModel;
+    var endY = projEndYear();
+    var caution = cautionYear();
+    var nowY = currentUtcYear();
+    var offs = (m && m.bandOffsets) || {};
+    var html = "";
+    var anyBeyond = false;
+    for (var y = 2010; y <= endY; y++) {
+      var dec31 = Date.UTC(y, 11, 31);
+      // Actual close cell: last stored price of the year; current year gets the
+      // in-progress '·' marker; future years show an em-dash.
+      var actualTd;
+      var close = lastCloseOfYear(y);
+      if (close && y === nowY) {
+        actualTd = '<td class="yt-prog" title="year in progress">' + esc(fmtUSD(close[1])) + " ·</td>";
+      } else if (close) {
+        actualTd = "<td>" + esc(fmtUSD(close[1])) + "</td>";
+      } else {
+        actualTd = "<td>—</td>";
+      }
+      // Model columns (fixed default percentile set, independent of legend state)
+      var cells;
+      if (m && m.a != null && m.n != null) {
+        cells =
+          "<td>" + esc(modelCell(m, dec31, offs.p025)) + "</td>" +
+          "<td>" + esc(modelCell(m, dec31, offs.p165)) + "</td>" +
+          "<td>" + esc(fmtUSD(modelUsdAt(m, dec31, 0))) + "</td>" +
+          "<td>" + esc(modelCell(m, dec31, offs.p835)) + "</td>" +
+          "<td>" + esc(modelCell(m, dec31, offs.p975)) + "</td>";
+      } else {
+        cells = "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
+      }
+      var beyond = y > caution;
+      if (beyond) anyBeyond = true;
+      var rowCls = "yt-row" + (y === nowY ? " yt-now" : "") + (beyond ? " yt-beyond" : "");
+      html += '<tr class="' + rowCls + '">' +
+        "<td>" + y + "</td>" +
+        actualTd +
+        cells +
+        "</tr>";
+    }
+    body.innerHTML = html;
+    show("yearTableFoot", anyBeyond);
+  }
+  function modelCell(m, ms, off) {
+    if (typeof off !== "number" || !isFinite(off)) return "—";
+    return fmtUSD(modelUsdAt(m, ms, off));
   }
 
   function renderMilestones(ms) {
@@ -668,7 +865,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
 
   async function loadSettings() {
     var res = await apiGet("/api/settings");
-    if (res.ok) { settingsCache = res.data || {}; fillSettingsForm(settingsCache); }
+    if (res.ok) { settingsCache = res.data || {}; fillSettingsForm(settingsCache); renderYearTable(); }
   }
   function fillSettingsForm(c) {
     c = c || {};
@@ -744,6 +941,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
         if (res.ok) {
           settingsCache = res.data || payload;
           fillSettingsForm(settingsCache);
+          renderYearTable();   // projectionEndYear may have changed the row range
           toast("Settings saved", "ok");
           loadStatus();
         } else {
@@ -773,6 +971,21 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     }
   }
 
+  // Year-end table collapsible (v0.1.2): mirrors the settings drawer toggle;
+  // expanded by default (the body starts visible in the page shell).
+  function wireYearTable() {
+    var toggle = $("yearTableToggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", function () {
+      var body = $("yearTableBody");
+      if (!body) return;
+      var open = body.style.display !== "none";
+      body.style.display = open ? "none" : "";
+      toggle.setAttribute("aria-expanded", open ? "false" : "true");
+      setText("yearTableChevron", open ? "▸" : "▾");
+    });
+  }
+
   // =========================================================================
   //  INFO POPOVERS  (the ⓘ tooltip/explainer system, spec 11.2)
   // =========================================================================
@@ -793,7 +1006,13 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     refitInterval: "How often the model refetches every data source and refits all parameters (n, A, R², sigma, bands). Default 12 hours. Lower = fresher parameters and slightly more API traffic; the fit itself only shifts meaningfully as new daily closes arrive.",
     spotPoll: "How often the live price refreshes (median of the responding exchanges). This drives the header ticker, the deviation and quantile tiles, and the provisional 'today' point the next refit will use.",
     projectionEndYear: "How far the trend and bands are drawn into the future on the chart. Anything past ~2040 is hatched because the model's authors themselves say not to rely on it out there.",
-    bandMode: "How the percentile bands are computed. Point-in-time (porkopolis's current method): each day's miss is measured against the trend as it was fitted using only data available up to that day - no hindsight. Full-sample: every day's miss is measured against today's trend line - simpler, but early history is judged with hindsight.",
+    bandMode: [
+      "Both modes draw the same kind of lines: 'price has historically closed below this line X% of the time.' They differ only in how history is scored.",
+      "Full-sample: every day in history is compared against today's trend line. Simple, but it judges 2011's prices with a curve fitted on everything through today - hindsight. Because the early years sit far from today's line, the extreme percentiles stretch wider: higher tops and lower floors.",
+      "Point-in-time (the default, and porkopolis's current method): each day is compared against the trend as it was fitted using only the data available up to that day - what the model would actually have said at the time, with no hindsight. The extreme percentiles, especially the upper ones, come out tighter.",
+      "Practical effect on the projections: full-sample paints a wider funnel around the trend (more optimistic ceilings, more pessimistic floors); point-in-time paints a narrower, more conservative funnel. Neither is a prediction - the bands describe how far price has historically wandered from trend, nothing more."
+    ],
+    yearEndTable: "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",
     sourceMode: "Auto uses every working source with built-in cross-checks and quorum rules - recommended. Manual lets you choose sources yourself; you must keep a valid history source (blockchain.info, or Bitstamp + Binance together) and at least two spot sources.",
     enabledSources: [
       "blockchainInfo: primary daily history since 2010 (multi-exchange average)",
@@ -909,6 +1128,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     wireControls();
     wireUpdateButton();
     wireSettings();
+    wireYearTable();
     wireInfo();
     // Boot-time loads force through the document.hidden guard so a page opened in
     // a background tab is fully populated (the interval pollers below keep it).
