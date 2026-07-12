@@ -141,13 +141,20 @@ test("year-end table exposes the Price | My-holdings mode toggle and BTC column"
   assert.ok(DASHBOARD_HTML.includes("yt-btc-input"), "per-row BTC input class missing");
 });
 
-test("year-end table carries the red/green tint classes (spec 13.3)", () => {
-  // tint class rules (green >= actual, red below) present in the page CSS + app markup
+test("year-end table tints only the actual cell vs trend (spec 13.3, v0.1.4)", () => {
+  // tint classes + spec hues still live in the page (CSS + the actual-cell renderer)
   assert.ok(DASHBOARD_HTML.includes("yt-hi"), "green tint class yt-hi missing");
   assert.ok(DASHBOARD_HTML.includes("yt-lo"), "red tint class yt-lo missing");
   // the spec-mandated tint hues
   assert.ok(DASHBOARD_HTML.includes("#42A04C"), "green tint colour missing");
   assert.ok(DASHBOARD_HTML.includes("#EF5350"), "red tint colour missing");
+  // v0.1.4: the actual close / value cell carries the tint, via the dedicated helper
+  assert.ok(DASHBOARD_HTML.includes("actualTintClass"), "actual-cell tint helper missing");
+  // the old v0.1.3 model/band-cell tint expression (line vs actual price) is gone
+  assert.ok(
+    !DASHBOARD_HTML.includes("price >= actualPrice"),
+    "model/band cells still carry the old tint logic",
+  );
 });
 
 test("year-end table help gains the holdings + tinting verbatim paragraphs", () => {
@@ -157,9 +164,19 @@ test("year-end table help gains the holdings + tinting verbatim paragraphs", () 
     ),
     "holdings help paragraph missing",
   );
+  // v0.1.4 REVISED tint copy: actual value vs trend, with the in-progress same-date rule
   assert.ok(
-    DASHBOARD_HTML.includes("a quick read of which lines contained reality"),
-    "tinting help sentence missing",
+    DASHBOARD_HTML.includes("the same above-or-below-trend read as the Deviation tile"),
+    "new tint help phrase (Deviation-tile read) missing",
+  );
+  assert.ok(
+    DASHBOARD_HTML.includes("the trend at the date of the latest close"),
+    "new tint help phrase (in-progress same-date rule) missing",
+  );
+  // the old v0.1.3 tint wording is gone
+  assert.ok(
+    !DASHBOARD_HTML.includes("a quick read of which lines contained reality"),
+    "old tint help sentence still present",
   );
 });
 

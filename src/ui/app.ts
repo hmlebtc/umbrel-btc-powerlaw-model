@@ -690,24 +690,46 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     if (gi && document.activeElement !== gi) gi.value = h.globalBtc ? fmtBtc(h.globalBtc) : "";
   }
 
-  // One model cell: price*scale, tinted vs the year's actual close price (green when
-  // the line sat at or above the actual, red when below). Comparison is on PRICES so
-  // holdings scale both sides equally and never introduces float noise. off=0 is the
-  // Trend; an absent percentile offset (pre-0.1.2 fit) renders an em-dash, untinted.
-  function valCell(m, ms, off, actualPrice, scale) {
+  // One model cell: price*scale, always untinted (v0.1.4 — only the Actual close /
+  // Actual value cell is tinted now, by actualTintClass; the model/band columns are
+  // plain text). off=0 is the Trend; an absent percentile offset (pre-0.1.2 fit)
+  // renders an em-dash.
+  function valCell(m, ms, off, scale) {
     if (typeof off !== "number" || !isFinite(off)) return "<td>—</td>";
     var price = modelUsdAt(m, ms, off);
-    var cls = "";
-    if (actualPrice != null && isFinite(actualPrice)) cls = price >= actualPrice ? "yt-hi" : "yt-lo";
-    return "<td" + (cls ? ' class="' + cls + '"' : "") + ">" + esc(fmtUSD(price * scale)) + "</td>";
+    return "<td>" + esc(fmtUSD(price * scale)) + "</td>";
   }
-  function modelCells(m, dec31, offs, actualPrice, scale) {
+  function modelCells(m, dec31, offs, scale) {
     if (!(m && m.a != null && m.n != null)) return "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
-    return valCell(m, dec31, offs.p025, actualPrice, scale) +
-      valCell(m, dec31, offs.p165, actualPrice, scale) +
-      valCell(m, dec31, 0, actualPrice, scale) +
-      valCell(m, dec31, offs.p835, actualPrice, scale) +
-      valCell(m, dec31, offs.p975, actualPrice, scale);
+    return valCell(m, dec31, offs.p025, scale) +
+      valCell(m, dec31, offs.p165, scale) +
+      valCell(m, dec31, 0, scale) +
+      valCell(m, dec31, offs.p835, scale) +
+      valCell(m, dec31, offs.p975, scale);
+  }
+  // Tint class for the Actual close / Actual value cell (v0.1.4, spec 13.3 REVISED).
+  // Green (yt-hi) when the year's actual close sat AT OR ABOVE the trend, red (yt-lo)
+  // when it finished below. Comparison-date fairness: a past year compares its Dec-31
+  // close to the Dec-31 trend; the in-progress year compares its latest close to the
+  // trend evaluated at THAT SAME date (t of the latest close), not Dec-31, so a mid-
+  // year read is not skewed. Prices are compared in both display modes (holdings
+  // scale both sides equally). No close (future years) or no model -> "" (untinted).
+  function actualTintClass(m, y, nowY, close, dec31) {
+    if (!(m && m.a != null && m.n != null)) return "";
+    if (!close) return "";
+    var actualPrice = close[1];
+    if (actualPrice == null || !isFinite(actualPrice)) return "";
+    var cmpMs = dec31;
+    if (y === nowY) { var d = dateToMs(String(close[0])); if (d != null) cmpMs = d; }
+    var trendPrice = modelUsdAt(m, cmpMs, 0);
+    if (!isFinite(trendPrice)) return "";
+    return actualPrice >= trendPrice ? "yt-hi" : "yt-lo";
+  }
+  // Parse a 'YYYY-MM-DD' date string to a UTC ms timestamp (null if unparseable).
+  function dateToMs(s) {
+    var mm = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || "");
+    if (!mm) return null;
+    return Date.UTC(+mm[1], +mm[2] - 1, +mm[3]);
   }
 
   function renderYearTable() {
@@ -726,8 +748,11 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     for (var y = 2010; y <= endY; y++) {
       var dec31 = Date.UTC(y, 11, 31);
       var close = lastCloseOfYear(y);
-      var actualPrice = close ? close[1] : null;   // price used for tinting (both modes)
+      var actualPrice = close ? close[1] : null;
       var scale = mode ? holdingsForYear(y, h) : 1;
+      // v0.1.4: only the actual close / value cell is tinted (green at/above trend,
+      // red below), with the fair same-date comparison for the year in progress.
+      var tint = actualTintClass(m, y, nowY, close, dec31);
       // Leading columns: Year, then either (BTC input + Actual value) or (Actual close).
       var lead;
       if (mode) {
@@ -737,18 +762,18 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
           '" value="' + (hasOv ? esc(fmtBtc(override)) : "") + '" placeholder="' + esc(h.globalBtc ? fmtBtc(h.globalBtc) : "0") +
           '" aria-label="BTC held at end of ' + y + '"></td>';
         var avCell;
-        if (close && y === nowY) avCell = '<td class="yt-prog" title="year in progress">' + esc(fmtUSD(actualPrice * scale)) + " ·</td>";
-        else if (close) avCell = "<td>" + esc(fmtUSD(actualPrice * scale)) + "</td>";
+        if (close && y === nowY) avCell = '<td class="yt-prog' + (tint ? " " + tint : "") + '" title="year in progress">' + esc(fmtUSD(actualPrice * scale)) + " ·</td>";
+        else if (close) avCell = "<td" + (tint ? ' class="' + tint + '"' : "") + ">" + esc(fmtUSD(actualPrice * scale)) + "</td>";
         else avCell = "<td>—</td>";
         lead = "<td>" + y + "</td>" + btcCell + avCell;
       } else {
         var actualTd;
-        if (close && y === nowY) actualTd = '<td class="yt-prog" title="year in progress">' + esc(fmtUSD(actualPrice)) + " ·</td>";
-        else if (close) actualTd = "<td>" + esc(fmtUSD(actualPrice)) + "</td>";
+        if (close && y === nowY) actualTd = '<td class="yt-prog' + (tint ? " " + tint : "") + '" title="year in progress">' + esc(fmtUSD(actualPrice)) + " ·</td>";
+        else if (close) actualTd = "<td" + (tint ? ' class="' + tint + '"' : "") + ">" + esc(fmtUSD(actualPrice)) + "</td>";
         else actualTd = "<td>—</td>";
         lead = "<td>" + y + "</td>" + actualTd;
       }
-      var cells = modelCells(m, dec31, offs, actualPrice, scale);
+      var cells = modelCells(m, dec31, offs, scale);
       var beyond = y > caution;
       if (beyond) anyBeyond = true;
       var rowCls = "yt-row" + (y === nowY ? " yt-now" : "") + (beyond ? " yt-beyond" : "");
@@ -1163,7 +1188,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     yearEndTable: [
       "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",
       "My holdings mode: enter how much BTC you expect to hold at the end of each year - one amount for every year, or per-year amounts if you plan to keep accumulating. The table then multiplies your holdings by each line's price for that year; past years use the actual closing price. The amounts are stored only on your Umbrel, behind its login. This is a what-if illustration, not financial advice.",
-      "For years with an actual close, model values are tinted green when that line sat at or above the actual price, red when it sat below - a quick read of which lines contained reality. It is not a judgment of good or bad."
+      "For years with an actual close, the actual value is tinted green when the year finished at or above the trend line, red when it finished below - the same above-or-below-trend read as the Deviation tile, year by year. For the year still in progress the comparison uses the trend at the date of the latest close, not December 31st. It is not a judgment of good or bad."
     ],
     sourceMode: "Auto uses every working source with built-in cross-checks and quorum rules - recommended. Manual lets you choose sources yourself; you must keep a valid history source (blockchain.info, or Bitstamp + Binance together) and at least two spot sources.",
     enabledSources: [

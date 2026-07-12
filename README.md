@@ -83,12 +83,14 @@ own Umbrel, behind its login - they are never sent anywhere else.** Unlike every
 environment-variable seed, because it's personal data you type into the dashboard, not deployment
 configuration. This is a what-if illustration of relative outcomes, not financial advice.
 
-In both view modes, every model column for a year with a known actual close (past years, plus the
-in-progress current year) has its text tinted **green** (`#42A04C`) when that line's price sat at or above
-the actual close for that year, and **red** (`#EF5350`) when it sat below - a quick visual read of which
-lines actually contained reality, not a judgment of whether the model - or the price - did "well." Holdings
-mode compares the same underlying prices (scaling both sides by the same BTC amount doesn't change which
-side is bigger), so the tinting is identical between the two views. Future years are never tinted.
+In both view modes, only the **actual close** cell (the **actual value** cell in holdings mode) is tinted:
+**green** (`#42A04C`) when that year finished at or above the trend line, and **red** (`#EF5350`) when it
+finished below - the same above-or-below-trend read as the Deviation tile, year by year. The model and band
+columns are plain, untinted text. The comparison is date-fair: a past year compares its December 31st close
+to the trend at December 31st, while the year still in progress compares its latest close to the trend at
+*that same date* rather than year-end, so a mid-year tint is never skewed. Holdings mode compares the same
+underlying prices (scaling both sides by the same BTC amount doesn't change which side is bigger), so the
+tinting is identical between the two views. Future years are never tinted.
 
 ## Data sources
 
