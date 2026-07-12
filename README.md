@@ -92,6 +92,14 @@ to the trend at December 31st, while the year still in progress compares its lat
 underlying prices (scaling both sides by the same BTC amount doesn't change which side is bigger), so the
 tinting is identical between the two views. Future years are never tinted.
 
+An **Export CSV** button in the table header downloads the whole table as an Excel-ready CSV, generated
+entirely in your browser (no server round-trip): UTF-8 with a byte-order mark and CRLF line endings, named
+`btc-powerlaw-year-end_<fit date>.csv`. The export is a *superset* of the on-screen columns - it includes
+**every** percentile line present in the current fit (0.5% through 99.5%), not just the default four, with
+`Trend` as the last column. Values are raw numbers with no currency symbols or thousand separators (prices to
+two decimals, BTC amounts to up to eight), so they drop straight into a spreadsheet; in **My holdings** mode
+it exports your per-year BTC amounts and their values instead of prices.
+
 ## Data sources
 
 | Source | Kinds | Notes |

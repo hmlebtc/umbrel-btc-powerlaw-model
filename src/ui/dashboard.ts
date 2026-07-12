@@ -224,6 +224,8 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   td.yt-lo { color: #EF5350; }
   /* Year-end table value-mode toggle + holdings controls (v0.1.3) */
   .yt-modeseg { margin-left: auto; }
+  /* Export CSV button (v0.1.5): sits next to the mode toggle in the card head */
+  .yt-export { font-size: 12px; padding: 5px 11px; margin-left: 8px; }
   .yt-holdings-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; }
   .yt-holdings-ctl label { font-weight: 600; color: var(--text); }
   .yt-holdings-ctl input { width: 160px; font: inherit; font-size: 14px; padding: 7px 10px; border-radius: 9px; background: var(--input); border: 1px solid var(--border2); color: var(--text); font-variant-numeric: tabular-nums; }
@@ -442,6 +444,7 @@ const PAGE_BODY: string = String.raw`</span>
         <button class="seg seg-on" id="ytMode_price" type="button" aria-pressed="true">Price</button>
         <button class="seg" id="ytMode_holdings" type="button" aria-pressed="false">My holdings</button>
       </div>
+      <button class="btn yt-export" id="ytExportBtn" type="button" aria-label="Export the year-end table as a CSV file">Export CSV</button>
     </div>
     <div id="yearTableBody">
       <div class="yt-holdings-ctl" id="ytHoldingsControl" style="display:none">

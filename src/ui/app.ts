@@ -602,17 +602,19 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   }
   // Latest calendar year we have any real (non-provisional) or provisional close for.
   function currentUtcYear() { return new Date().getUTCFullYear(); }
-  // The last stored price whose date falls in year Y, plus whether it is provisional.
-  function lastCloseOfYear(y) {
+  // The last stored price whose date falls in year Y (pure over an explicit
+  // series so the CSV builder can reuse it without touching closure state).
+  function lastCloseInSeries(series, y) {
     var best = null;
-    for (var i = 0; i < priceSeries.length; i++) {
-      var row = priceSeries[i];
+    for (var i = 0; i < series.length; i++) {
+      var row = series[i];
       var ys = parseInt(String(row[0]).slice(0, 4), 10);
       if (ys !== y) continue;
       if (best === null || String(row[0]) > String(best[0])) best = row;
     }
     return best; // [date, usd, flag] or null
   }
+  function lastCloseOfYear(y) { return lastCloseInSeries(priceSeries, y); }
   function projEndYear() {
     // Follow the live setting so the row range extends immediately when the user
     // changes projectionEndYear (before the next refit rewrites model.projection).
@@ -730,6 +732,107 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     var mm = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || "");
     if (!mm) return null;
     return Date.UTC(+mm[1], +mm[2] - 1, +mm[3]);
+  }
+
+  // =========================================================================
+  //  YEAR-END TABLE CSV EXPORT (v0.1.5, spec 14 — client-side, no API change)
+  // =========================================================================
+  // Ascending percentile columns for the export, 0.5% -> 99.5%. This is the FULL
+  // superset (every line in a current fit), not the on-screen default four; the
+  // builder keeps only the percentiles whose offset key exists in the given model
+  // (legacy fits export what they have), and Trend is always the LAST column.
+  var CSV_PCTS = [
+    { key: "p005", label: "0.5%" },
+    { key: "p025", label: "2.5%" },
+    { key: "p10",  label: "10%" },
+    { key: "p165", label: "16.5%" },
+    { key: "p25",  label: "25%" },
+    { key: "p50",  label: "50%" },
+    { key: "p75",  label: "75%" },
+    { key: "p835", label: "83.5%" },
+    { key: "p90",  label: "90%" },
+    { key: "p975", label: "97.5%" },
+    { key: "p995", label: "99.5%" }
+  ];
+  // One numeric price cell for the CSV: raw number, 2 decimals, no currency
+  // symbol / thousand separators; empty when the model or offset is unavailable.
+  function csvPrice(m, ms, off, scale) {
+    if (!(m && m.a != null && m.n != null)) return "";
+    if (typeof off !== "number" || !isFinite(off)) return "";
+    var price = modelUsdAt(m, ms, off);
+    if (price == null || !isFinite(price)) return "";
+    return (price * scale).toFixed(2);
+  }
+  // Pure CSV builder (spec 14): rows come only from (model, price series, holdings,
+  // endYear) — no DOM, no closure mutable state — so it is unit-tested directly
+  // through the smoke-test harness. Emits UTF-8 BOM + CRLF row endings. Columns:
+  // Year, [BTC held in holdings mode], Actual close/value, ascending percentiles
+  // present in the fit, Trend last. In holdings mode every price column becomes
+  // holdings x price and its header gains a " value" suffix.
+  function buildYearEndCsv(m, series, holdings, endYear) {
+    var BOM = "\uFEFF";
+    var mode = !!(holdings && holdings.enabled);
+    var offs = (m && m.bandOffsets) || {};
+    var present = [];
+    for (var i = 0; i < CSV_PCTS.length; i++) {
+      var k = CSV_PCTS[i].key;
+      if (typeof offs[k] === "number" && isFinite(offs[k])) present.push(CSV_PCTS[i]);
+    }
+    var header = ["Year"];
+    if (mode) header.push("BTC held");
+    header.push(mode ? "Actual value" : "Actual close");
+    for (i = 0; i < present.length; i++) header.push(mode ? (present[i].label + " value") : present[i].label);
+    header.push(mode ? "Trend value" : "Trend");
+    var lines = [header.join(",")];
+    for (var y = 2010; y <= endYear; y++) {
+      var dec31 = Date.UTC(y, 11, 31);
+      var scale = mode ? holdingsForYear(y, holdings) : 1;
+      var row = [String(y)];
+      if (mode) row.push(fmtBtc(holdingsForYear(y, holdings)));
+      var close = lastCloseInSeries(series, y);
+      var actual = close ? close[1] : null;
+      row.push((actual != null && isFinite(actual)) ? (actual * scale).toFixed(2) : "");
+      for (i = 0; i < present.length; i++) row.push(csvPrice(m, dec31, offs[present[i].key], scale));
+      row.push(csvPrice(m, dec31, 0, scale));
+      lines.push(row.join(","));
+    }
+    return BOM + lines.join("\r\n");
+  }
+  // The fitted-date stamp for the export filename: fittedAt as YYYY-MM-DD
+  // (UTC), falling back to today when the fit somehow lacks a timestamp.
+  function fittedDate(m) {
+    var iso = toIso(m && m.fittedAt);
+    if (!iso) iso = new Date().toISOString();
+    return iso.slice(0, 10);
+  }
+  // Trigger a client-side download of the CSV text via a temporary object-URL
+  // anchor, revoking the URL afterwards (spec 14 — no server endpoint).
+  function downloadCsv(text, filename) {
+    try {
+      var blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      if (a.parentNode) a.parentNode.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+    } catch (e) {
+      toast("Could not export CSV", "error");
+    }
+  }
+  // Wire the "Export CSV" button (spec 14). Builds the CSV from the current model,
+  // price series, and holdings settings, then downloads it.
+  function wireExportCsv() {
+    var btn = $("ytExportBtn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (!lastModel) { toast("No model yet — nothing to export", "info"); return; }
+      var csv = buildYearEndCsv(lastModel, priceSeries, currentHoldings(), projEndYear());
+      downloadCsv(csv, "btc-powerlaw-year-end_" + fittedDate(lastModel) + ".csv");
+    });
   }
 
   function renderYearTable() {
@@ -1147,6 +1250,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   // expanded by default (the body starts visible in the page shell).
   function wireYearTable() {
     wireHoldingsMode();
+    wireExportCsv();
     var toggle = $("yearTableToggle");
     if (!toggle) return;
     toggle.addEventListener("click", function () {
@@ -1188,7 +1292,8 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     yearEndTable: [
       "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",
       "My holdings mode: enter how much BTC you expect to hold at the end of each year - one amount for every year, or per-year amounts if you plan to keep accumulating. The table then multiplies your holdings by each line's price for that year; past years use the actual closing price. The amounts are stored only on your Umbrel, behind its login. This is a what-if illustration, not financial advice.",
-      "For years with an actual close, the actual value is tinted green when the year finished at or above the trend line, red when it finished below - the same above-or-below-trend read as the Deviation tile, year by year. For the year still in progress the comparison uses the trend at the date of the latest close, not December 31st. It is not a judgment of good or bad."
+      "For years with an actual close, the actual value is tinted green when the year finished at or above the trend line, red when it finished below - the same above-or-below-trend read as the Deviation tile, year by year. For the year still in progress the comparison uses the trend at the date of the latest close, not December 31st. It is not a judgment of good or bad.",
+      "Export CSV downloads this table with full-precision numbers and every percentile line in the current fit - not just the columns shown - ready for Excel or any spreadsheet. In My holdings mode it exports your holdings and their values instead of prices."
     ],
     sourceMode: "Auto uses every working source with built-in cross-checks and quorum rules - recommended. Manual lets you choose sources yourself; you must keep a valid history source (blockchain.info, or Bitstamp + Binance together) and at least two spot sources.",
     enabledSources: [
@@ -1317,6 +1422,10 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     setInterval(loadEvents, 20000);
     setInterval(tick, 1000);
   }
+
+  // Expose the pure year-end CSV builder (spec 14) so the Export CSV click flow
+  // and the smoke-test harness can reach it. Nothing else on the app is global.
+  window.PLApp = { buildYearEndCsv: buildYearEndCsv };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();

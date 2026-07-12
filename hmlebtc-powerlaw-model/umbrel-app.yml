@@ -6,7 +6,7 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.4"
+version: "0.1.5"
 tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
@@ -31,6 +31,17 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.1.5 - export the year-end table to CSV.
+
+  The year-end model table gains an "Export CSV" button in its header, next to the Price / My holdings
+  toggle. It downloads the whole table as an Excel-ready CSV generated entirely in your browser - no server
+  round-trip - as UTF-8 with a byte-order mark and CRLF line endings, named after the current fit date. The
+  export is a superset of what's on screen: it includes every percentile line present in the current fit
+  (0.5% through 99.5%), not just the default four, with Trend as the last column, and raw numbers with no
+  currency symbols or thousand separators so they drop straight into a spreadsheet. In "My holdings" mode it
+  exports your per-year BTC amounts and their values instead of prices. No data or settings migration needed;
+  existing installs pick this up on their next update.
+
   v0.1.4 - the year-end table's tinting now reads the actual close, not the model.
 
   Following on from v0.1.3, the year-end model table no longer tints the trend and band columns.
