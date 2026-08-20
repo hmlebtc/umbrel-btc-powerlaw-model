@@ -32,6 +32,16 @@ function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * `n` whole UTC days before today. The recent-fill window is measured against
+ * the WALL CLOCK (jobs.ts RECENT_WINDOW_DAYS), so a test that exercises it has
+ * to place its days relative to today — hard-coded dates silently fall out of
+ * the window as the fixture ages and the fill path stops being reached at all.
+ */
+function daysAgoUtc(n: number): string {
+  return new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+}
+
 function build(sources?: PriceSource[]) {
   const registry = new SourceRegistry(sources ?? createMockSources());
   const priceStore = new PriceStore();
@@ -84,6 +94,35 @@ test('JobRunner: a full MOCK refit fits the fixture in-corridor with a provision
   assert.equal(modelStore.history()[0]!.fittedAt, m!.fittedAt);
 });
 
+test('JobRunner: a quantileRegression refit persists the ladder to model.json (spec 15.2)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-qr-model-'));
+  try {
+    const registry = new SourceRegistry(createMockSources());
+    const priceStore = new PriceStore();
+    const getSettings = () => ({ ...defaultSettings(), bandMode: 'quantileRegression' as const });
+    const spot = new SpotAggregator(registry, getSettings);
+    const modelStore = new ModelStore(dir); // persists to <dir>/model.json
+    const jobStats = new JobStats();
+    const events = new EventLog();
+    const runner = new JobRunner({ registry, priceStore, spot, getSettings, modelStore, jobStats, events });
+    await runToCompletion(runner);
+    assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+
+    const rec = modelStore.current()!;
+    assert.equal(rec.bandMode, 'quantileRegression');
+    assert.ok(rec.bandLines, 'the record must carry the ladder');
+
+    // It survives the JSON round-trip to disk (a fresh store reads it back).
+    const reloaded = new ModelStore(dir).current()!;
+    assert.deepEqual(reloaded.bandLines, rec.bandLines);
+    assert.equal(Object.keys(reloaded.bandLines!).length, 11);
+    // Fallback offsets are persisted alongside it, unchanged in shape.
+    assert.equal(Object.keys(reloaded.bandOffsets).length, 11);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // F2: TODAY is never committed; it enters the fit only as the provisional spot.
 // ---------------------------------------------------------------------------
@@ -121,8 +160,9 @@ test('JobRunner: a today-dated candle is never committed; provisional spot is us
 // ---------------------------------------------------------------------------
 
 test('gatherRecent: parallel Kraken/Bitstamp/Binance feed a per-day quorum (F3a)', async () => {
-  const dayA = '2026-07-08';
-  const dayB = '2026-07-09';
+  // Inside the recent window (and never today, which is never committed).
+  const dayA = daysAgoUtc(3);
+  const dayB = daysAgoUtc(2);
   const sources = createMockSources().map((s) => {
     if (s.name === 'blockchainInfo') {
       // Primary stops before the recent window so there is a gap to fill.

@@ -13,6 +13,8 @@
  */
 
 import type {
+  BandLine,
+  BandLines,
   BandMode,
   BandOffsets,
   DailyObservation,
@@ -115,6 +117,41 @@ function prepare(sample: readonly DailyObservation[]): Prepared {
 }
 
 /**
+ * Slope/intercept of a (optionally weighted) least-squares line through the
+ * prepared log columns, via the same O(1)-updatable running sums the rest of the
+ * engine uses. With no weights this is plain OLS (w=1 multiplies exactly, so the
+ * unweighted path is bit-identical to summing the raw columns); with weights it
+ * is the weighted step of the quantile-regression IRLS loop (spec 15.1).
+ */
+function lineFromColumns(
+  xs: readonly number[],
+  ys: readonly number[],
+  weights?: readonly number[],
+): { a: number; n: number } {
+  const N = xs.length;
+  let sw = 0;
+  let sx = 0;
+  let sy = 0;
+  let sxx = 0;
+  let sxy = 0;
+  for (let i = 0; i < N; i++) {
+    const w = weights ? (weights[i] as number) : 1;
+    const xi = xs[i] as number;
+    const yi = ys[i] as number;
+    sw += w;
+    sx += w * xi;
+    sy += w * yi;
+    sxx += w * xi * xi;
+    sxy += w * xi * yi;
+  }
+  const denom = sw * sxx - sx * sx;
+  if (denom === 0) throw new Error('fitOLS: degenerate x column (all t equal)');
+  const n = (sw * sxy - sx * sy) / denom;
+  const a = (sy - n * sx) / sw;
+  return { a, n };
+}
+
+/**
  * Ordinary least squares of y=log10(usd) on x=log10(t). Returns slope n,
  * intercept a (= log10 A), r2 = 1 - SSE/SST, sigma = population std-dev of
  * residuals, and the chronological residual vector. Throws when fewer than two
@@ -125,23 +162,10 @@ export function fitOLS(sample: readonly DailyObservation[]): OlsFit {
   const N = xs.length;
   if (N < 2) throw new Error(`fitOLS needs >=2 positive-price points, got ${N}`);
 
-  let sx = 0;
-  let sy = 0;
-  let sxx = 0;
-  let sxy = 0;
-  for (let i = 0; i < N; i++) {
-    const xi = xs[i] as number;
-    const yi = ys[i] as number;
-    sx += xi;
-    sy += yi;
-    sxx += xi * xi;
-    sxy += xi * yi;
-  }
-  const denom = N * sxx - sx * sx;
-  if (denom === 0) throw new Error('fitOLS: degenerate x column (all t equal)');
-  const n = (N * sxy - sx * sy) / denom;
-  const a = (sy - n * sx) / N;
+  const { a, n } = lineFromColumns(xs, ys);
 
+  let sy = 0;
+  for (let i = 0; i < N; i++) sy += ys[i] as number;
   const yBar = sy / N;
   let sse = 0;
   let sst = 0;
@@ -250,6 +274,11 @@ export function pointInTimeResiduals(sample: readonly DailyObservation[]): numbe
  * must be taken against THIS set so the quantile readout and the band the spot
  * visually sits in can never disagree — hence it is exported for on-demand
  * recomputation (the set itself is too big to persist).
+ *
+ * `quantileRegression` has no residual set of its own — its lines are fitted
+ * directly to the prices — so it falls through to the full-sample residuals,
+ * which is exactly the fallback bandOffsets carries in that mode (spec 15.1).
+ * The quantile READOUT in that mode comes from quantileFromLines(), not here.
  */
 export function residualsForBands(
   sample: readonly DailyObservation[],
@@ -283,10 +312,192 @@ export function computeBandOffsets(
 }
 
 // ---------------------------------------------------------------------------
+// Quantile regression bands (spec section 15.1)
+// ---------------------------------------------------------------------------
+
+/** A band key of the eleven-line ladder (shared by offsets and lines). */
+export type BandKey = keyof BandOffsets;
+
+/**
+ * The ladder's quantile levels, one per band key, in ASCENDING tau order — the
+ * order the monotone rearrangement assigns sorted values back in. tau is the
+ * fraction (0.975), the matching BAND_PCTS entry the percentage (97.5).
+ */
+export const BAND_TAUS: Readonly<Record<BandKey, number>> = {
+  p005: 0.005,
+  p025: 0.025,
+  p10: 0.1,
+  p165: 0.165,
+  p25: 0.25,
+  p50: 0.5,
+  p75: 0.75,
+  p835: 0.835,
+  p90: 0.9,
+  p975: 0.975,
+  p995: 0.995,
+};
+
+/** Band keys in ascending-tau order (BAND_TAUS is declared in that order). */
+export const BAND_KEYS = Object.keys(BAND_TAUS) as BandKey[];
+
+/** IRLS stopping rule: |da| + |dn| below this ends the loop as converged. */
+export const QR_TOLERANCE = 1e-10;
+/** Hard iteration cap — the loop is deterministic, never open-ended. */
+export const QR_MAX_ITERATIONS = 200;
+/** Floor on |residual| in the IRLS weight, so a point on the line can't divide by 0. */
+const QR_MIN_ABS_RESIDUAL = 1e-6;
+
+/** The quantile readout is clamped to the ladder's own outer levels. */
+const QUANTILE_MIN = 0.5;
+const QUANTILE_MAX = 99.5;
+
+export interface QuantileLineFit extends BandLine {
+  /** IRLS iterations actually run (1..QR_MAX_ITERATIONS). */
+  iterations: number;
+  /** True when |da|+|dn| fell under QR_TOLERANCE before the cap. */
+  converged: boolean;
+}
+
+/**
+ * Linear quantile regression y = a + n*x minimising the pinball loss
+ * `sum rho_tau(y - a - n*x)`, `rho_tau(u) = u*(tau - [u<0])` (spec 15.1).
+ *
+ * Method: IRLS. Start from the OLS solution, then repeatedly reweight each point
+ * by `|tau - [r_i<0]| / max(|r_i|, 1e-6)` and re-solve the weighted least-squares
+ * line — the weighted L2 problem whose fixed point is the L1-type pinball
+ * optimum. Stops when |da| + |dn| < 1e-10 or after 200 iterations. Wholly
+ * deterministic: no randomness, no time-dependence, and the accumulation order
+ * is fixed, so repeated runs on the same columns are bit-identical.
+ */
+export function fitQuantileLine(
+  xs: readonly number[],
+  ys: readonly number[],
+  tau: number,
+): QuantileLineFit {
+  const N = xs.length;
+  if (N < 2) throw new Error(`fitQuantileLine needs >=2 points, got ${N}`);
+
+  let { a, n } = lineFromColumns(xs, ys);
+  const weights = new Array<number>(N);
+  let iterations = 0;
+  let converged = false;
+
+  for (let it = 1; it <= QR_MAX_ITERATIONS; it++) {
+    iterations = it;
+    for (let i = 0; i < N; i++) {
+      const resid = (ys[i] as number) - (a + n * (xs[i] as number));
+      weights[i] =
+        Math.abs(tau - (resid < 0 ? 1 : 0)) / Math.max(Math.abs(resid), QR_MIN_ABS_RESIDUAL);
+    }
+    const next = lineFromColumns(xs, ys, weights);
+    const delta = Math.abs(next.a - a) + Math.abs(next.n - n);
+    a = next.a;
+    n = next.n;
+    if (delta < QR_TOLERANCE) {
+      converged = true;
+      break;
+    }
+  }
+
+  return { a, n, iterations, converged };
+}
+
+/**
+ * The eleven ladder taus fitted as separate quantile regressions on the SAME
+ * prepared log-log columns fitOLS uses (spec 15.1). Each line gets its own slope,
+ * which is the whole point of the mode: porkopolis's latest methodology draws
+ * separately-sloped percentile lines that converge toward trend rather than
+ * parallel offsets from it.
+ */
+export function fitBandLines(sample: readonly DailyObservation[]): BandLines {
+  const { xs, ys } = prepare(sample);
+  const out = {} as Record<BandKey, BandLine>;
+  for (const key of BAND_KEYS) {
+    const q = fitQuantileLine(xs, ys, BAND_TAUS[key]);
+    out[key] = { a: q.a, n: q.n };
+  }
+  return out as BandLines;
+}
+
+function isFiniteLine(line: BandLine | undefined): line is BandLine {
+  return !!line && Number.isFinite(line.a) && Number.isFinite(line.n);
+}
+
+/**
+ * The eleven band prices at day t, MONOTONE-REARRANGED
+ * (Chernozhukov-Fernandez-Val-Galichon): evaluate every line, sort the values
+ * ascending, and hand them back to the ladder keys in ascending-tau order. Fitted
+ * quantile lines have independent slopes and may therefore cross far outside the
+ * data range; rearranging makes the drawn ladder non-crossing at EVERY t while
+ * leaving the set of values untouched. Every consumer (chart, tooltip, oscillator
+ * guides, year-end table, CSV) must read band values through this.
+ *
+ * A malformed / partial `bandLines` (hand-edited model.json) yields only the keys
+ * that could be evaluated, rearranged among themselves.
+ */
+export function bandPricesAt(bandLines: BandLines, tDays: number): Record<BandKey, number> {
+  const keys = BAND_KEYS.filter((k) => isFiniteLine(bandLines[k]));
+  const values = keys
+    .map((k) => {
+      const line = bandLines[k];
+      return trendUsdAt(line.a, line.n, tDays);
+    })
+    .sort((p, q) => p - q);
+  const out = {} as Record<BandKey, number>;
+  for (let i = 0; i < keys.length; i++) out[keys[i] as BandKey] = values[i] as number;
+  return out;
+}
+
+/**
+ * Current quantile in `quantileRegression` mode: where `priceUsd` sits among the
+ * rearranged ladder values at day t, with tau linearly interpolated between the
+ * two bracketing lines and scaled to a percentage. The interpolation runs in
+ * log10 price space — the space the whole engine (and the residual-based quantile
+ * of the other two modes) works in. Clamped to the ladder's own outer levels
+ * [0.5, 99.5]; NaN for a non-positive price or t < 1.
+ */
+export function quantileFromLines(
+  bandLines: BandLines,
+  tDays: number,
+  priceUsd: number,
+): number {
+  if (!(priceUsd > 0) || tDays < 1) return NaN;
+  const prices = bandPricesAt(bandLines, tDays);
+  const keys = BAND_KEYS.filter((k) => Number.isFinite(prices[k]) && prices[k] > 0);
+  if (keys.length === 0) return NaN;
+
+  const clamp = (q: number): number => Math.min(QUANTILE_MAX, Math.max(QUANTILE_MIN, q));
+  const pctAt = (k: BandKey): number => BAND_TAUS[k] * 100;
+  const logAt = (k: BandKey): number => Math.log10(prices[k]);
+
+  const y = Math.log10(priceUsd);
+  if (y <= logAt(keys[0] as BandKey)) return clamp(pctAt(keys[0] as BandKey));
+  for (let i = 1; i < keys.length; i++) {
+    const lo = keys[i - 1] as BandKey;
+    const hi = keys[i] as BandKey;
+    const loY = logAt(lo);
+    const hiY = logAt(hi);
+    if (y <= hiY) {
+      const span = hiY - loY;
+      const w = span > 0 ? (y - loY) / span : 0;
+      return clamp(pctAt(lo) + w * (pctAt(hi) - pctAt(lo)));
+    }
+  }
+  return clamp(pctAt(keys[keys.length - 1] as BandKey));
+}
+
+// ---------------------------------------------------------------------------
 // Top-level fit
 // ---------------------------------------------------------------------------
 
-/** Fit the sample and attach band offsets for `mode`. */
+/**
+ * Fit the sample and attach band offsets for `mode`. In `quantileRegression`
+ * mode the eleven separately-sloped ladder lines are attached as well, and
+ * `bandOffsets` is STILL filled with the full-sample offsets: a documented
+ * fallback so a stale client (or any consumer reading an old record shape) keeps
+ * drawing parallel bands instead of nothing. sigma / r2 / falsifiability stay
+ * OLS-based in every mode.
+ */
 export function fit(
   sample: readonly DailyObservation[],
   mode: BandMode,
@@ -294,7 +505,7 @@ export function fit(
 ): ModelFit {
   const ols = fitOLS(sample);
   const bandOffsets = computeBandOffsets(ols, sample, mode);
-  return {
+  const out: ModelFit = {
     a: ols.a,
     n: ols.n,
     A: ols.A,
@@ -307,6 +518,8 @@ export function fit(
     bandOffsets,
     includesProvisionalSpot,
   };
+  if (mode === 'quantileRegression') out.bandLines = fitBandLines(sample);
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -304,14 +304,16 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     var el = $("lg_" + key);
     if (el) el.setAttribute("aria-pressed", prefs.bands[key] === true ? "true" : "false");
   }
-  // Disable chips whose offset key the current model lacks (pre-0.1.2 fits), with
-  // the spec title; re-enable once a fresh fit supplies the key.
+  // Disable chips the current model cannot draw (pre-0.1.2 fits missing an offset),
+  // with the spec title; re-enable once a fresh fit supplies the key. Availability
+  // is asked of the same helper the chart's own linePresent() mirrors, so in
+  // quantileRegression mode a chip tracks its fitted line rather than its offset.
   function updateLegendAvailability(m) {
-    var offs = (m && m.bandOffsets) || {};
+    var lines = bandLinesOf(m);
     for (var i = 0; i < BAND_KEYS.length; i++) {
       var key = BAND_KEYS[i], el = $("lg_" + key);
       if (!el) continue;
-      var present = typeof offs[key] === "number" && isFinite(offs[key]);
+      var present = bandKeyPresent(m, lines, key);
       el.disabled = !present;
       if (present) el.removeAttribute("title");
       else el.title = "available after the next model update";
@@ -579,9 +581,16 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     setText("ro_A", m.a != null ? ("10^" + Number(m.a).toFixed(3)) : "—");
     setText("ro_r2", m.r2 != null ? Number(m.r2).toFixed(4) : "—");
     setText("ro_sigma", m.sigma != null ? Number(m.sigma).toFixed(4) : "—");
-    setText("bandModeNote", m.bandMode === "fullSample" ? "bands: full-sample percentiles" : "bands: point-in-time percentiles");
+    setText("bandModeNote", bandModeNote(m.bandMode));
     renderMilestones(m.milestones || {});
     renderFalsifiability(m.falsifiability || {});
+  }
+  // The chart's top-right corner note names the methodology the drawn bands came
+  // from (v0.1.6 adds the quantile-regression branch).
+  function bandModeNote(mode) {
+    if (mode === "quantileRegression") return "bands: quantile regression";
+    if (mode === "fullSample") return "bands: full-sample percentiles";
+    return "bands: point-in-time percentiles";
   }
 
   // =========================================================================
@@ -589,16 +598,76 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   // =========================================================================
   // One row per calendar year 2010..projectionEndYear. "Actual close" is the last
   // stored price of that year (from /api/prices, which the app already holds);
-  // the model columns (2.5/16.5/Trend/83.5/97.5%) are computed client-side from
-  // (a, n, bandOffsets) at t(Dec 31). Columns are FIXED to the default percentile
-  // set regardless of the chart legend. Recomputed on model/prices refresh and
-  // when projectionEndYear changes.
+  // the model columns (2.5/16.5/Trend/83.5/97.5%) are computed client-side at
+  // t(Dec 31) from the fit — parallel offsets, or the fit's own band lines in
+  // quantileRegression mode (v0.1.6), always through bandUsdAt(). Columns are FIXED
+  // to the default percentile set regardless of the chart legend. Recomputed on
+  // model/prices refresh and when projectionEndYear changes.
   var YEAR_GENESIS = Date.UTC(2009, 0, 3);
   function tDays(ms) { var d = Math.floor((ms - YEAR_GENESIS) / DAY); return d < 1 ? 1 : d; }
   function trendLogAtYear(m, ms) { return m.a + m.n * (Math.log(tDays(ms)) / Math.LN10); }
   function modelUsdAt(m, ms, off) {
     var lg = trendLogAtYear(m, ms) + (off || 0);
     return Math.pow(10, lg);
+  }
+
+  // ---- band column evaluation (v0.1.6, spec 15.3) -------------------------
+  // ONE bandLines-aware helper behind every band column, so the year-end table, the
+  // CSV export and the chart can never disagree about what a percentile is worth on
+  // a date. In quantileRegression mode each percentile is its own fitted line and
+  // the ladder values at a date are MONOTONE-REARRANGED (evaluate every line, sort
+  // ascending, hand back in ascending-tau order) exactly as the backend's
+  // bandPricesAt() does; in every other mode — and for a stale record that claims
+  // the mode but carries no usable bandLines — the value is the parallel
+  // trend + offset. Ladder order matches the backend BAND_KEYS.
+  var QR_LADDER = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+  function bandLinesOf(m) {
+    if (!(m && m.bandMode === "quantileRegression" && m.bandLines)) return null;
+    var out = {}, any = false, i, ln;
+    for (i = 0; i < QR_LADDER.length; i++) {
+      ln = m.bandLines[QR_LADDER[i]];
+      if (!ln || typeof ln.a !== "number" || !isFinite(ln.a)) continue;
+      if (typeof ln.n !== "number" || !isFinite(ln.n)) continue;
+      out[QR_LADDER[i]] = ln;
+      any = true;
+    }
+    return any ? out : null;
+  }
+  // The rearranged ladder prices at a date: { key -> usd } over the present lines.
+  function bandLinePricesAt(lines, ms) {
+    var lg = Math.log(tDays(ms)) / Math.LN10;
+    var keys = [], vals = [], i;
+    for (i = 0; i < QR_LADDER.length; i++) {
+      if (!lines[QR_LADDER[i]]) continue;
+      keys.push(QR_LADDER[i]);
+      vals.push(Math.pow(10, lines[QR_LADDER[i]].a + lines[QR_LADDER[i]].n * lg));
+    }
+    vals.sort(function (p, q) { return p - q; });
+    var out = {};
+    for (i = 0; i < keys.length; i++) out[keys[i]] = vals[i];
+    return out;
+  }
+  // Price of one column at a date. key === null is the Trend itself (mode-independent);
+  // null is returned when the column is unavailable in this fit (a percentile a legacy
+  // record never carried), which the callers render as an em-dash / empty CSV field.
+  function bandUsdAt(m, ms, key) {
+    if (!(m && m.a != null && m.n != null)) return null;
+    if (key == null) return modelUsdAt(m, ms, 0);
+    var lines = bandLinesOf(m);
+    if (lines) {
+      var price = bandLinePricesAt(lines, ms)[key];
+      return (typeof price === "number" && isFinite(price)) ? price : null;
+    }
+    var off = (m.bandOffsets || {})[key];
+    if (typeof off !== "number" || !isFinite(off)) return null;
+    return modelUsdAt(m, ms, off);
+  }
+  // Whether a percentile column exists in this fit at all (its own line in
+  // quantileRegression mode, otherwise a finite offset).
+  function bandKeyPresent(m, lines, key) {
+    if (lines) return !!lines[key];
+    var off = (m && m.bandOffsets) ? m.bandOffsets[key] : undefined;
+    return typeof off === "number" && isFinite(off);
   }
   // Latest calendar year we have any real (non-provisional) or provisional close for.
   function currentUtcYear() { return new Date().getUTCFullYear(); }
@@ -694,20 +763,20 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
 
   // One model cell: price*scale, always untinted (v0.1.4 — only the Actual close /
   // Actual value cell is tinted now, by actualTintClass; the model/band columns are
-  // plain text). off=0 is the Trend; an absent percentile offset (pre-0.1.2 fit)
-  // renders an em-dash.
-  function valCell(m, ms, off, scale) {
-    if (typeof off !== "number" || !isFinite(off)) return "<td>—</td>";
-    var price = modelUsdAt(m, ms, off);
+  // plain text). key === null is the Trend; a column this fit cannot evaluate
+  // (percentile absent from a pre-0.1.2 record) renders an em-dash.
+  function valCell(m, ms, key, scale) {
+    var price = bandUsdAt(m, ms, key);
+    if (price == null || !isFinite(price)) return "<td>—</td>";
     return "<td>" + esc(fmtUSD(price * scale)) + "</td>";
   }
-  function modelCells(m, dec31, offs, scale) {
+  function modelCells(m, dec31, scale) {
     if (!(m && m.a != null && m.n != null)) return "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
-    return valCell(m, dec31, offs.p025, scale) +
-      valCell(m, dec31, offs.p165, scale) +
-      valCell(m, dec31, 0, scale) +
-      valCell(m, dec31, offs.p835, scale) +
-      valCell(m, dec31, offs.p975, scale);
+    return valCell(m, dec31, "p025", scale) +
+      valCell(m, dec31, "p165", scale) +
+      valCell(m, dec31, null, scale) +
+      valCell(m, dec31, "p835", scale) +
+      valCell(m, dec31, "p975", scale);
   }
   // Tint class for the Actual close / Actual value cell (v0.1.4, spec 13.3 REVISED).
   // Green (yt-hi) when the year's actual close sat AT OR ABOVE the trend, red (yt-lo)
@@ -754,12 +823,12 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     { key: "p975", label: "97.5%" },
     { key: "p995", label: "99.5%" }
   ];
-  // One numeric price cell for the CSV: raw number, 2 decimals, no currency
-  // symbol / thousand separators; empty when the model or offset is unavailable.
-  function csvPrice(m, ms, off, scale) {
-    if (!(m && m.a != null && m.n != null)) return "";
-    if (typeof off !== "number" || !isFinite(off)) return "";
-    var price = modelUsdAt(m, ms, off);
+  // One numeric price cell for the CSV: raw number, 2 decimals, no currency symbol /
+  // thousand separators; empty when the column is unavailable in this fit. Values
+  // come from the same bandUsdAt() helper the on-screen table uses (key === null is
+  // the Trend), so an export can never disagree with the table or the chart.
+  function csvPrice(m, ms, key, scale) {
+    var price = bandUsdAt(m, ms, key);
     if (price == null || !isFinite(price)) return "";
     return (price * scale).toFixed(2);
   }
@@ -772,11 +841,10 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   function buildYearEndCsv(m, series, holdings, endYear) {
     var BOM = "\uFEFF";
     var mode = !!(holdings && holdings.enabled);
-    var offs = (m && m.bandOffsets) || {};
+    var lines = bandLinesOf(m);
     var present = [];
     for (var i = 0; i < CSV_PCTS.length; i++) {
-      var k = CSV_PCTS[i].key;
-      if (typeof offs[k] === "number" && isFinite(offs[k])) present.push(CSV_PCTS[i]);
+      if (bandKeyPresent(m, lines, CSV_PCTS[i].key)) present.push(CSV_PCTS[i]);
     }
     var header = ["Year"];
     if (mode) header.push("BTC held");
@@ -792,8 +860,8 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
       var close = lastCloseInSeries(series, y);
       var actual = close ? close[1] : null;
       row.push((actual != null && isFinite(actual)) ? (actual * scale).toFixed(2) : "");
-      for (i = 0; i < present.length; i++) row.push(csvPrice(m, dec31, offs[present[i].key], scale));
-      row.push(csvPrice(m, dec31, 0, scale));
+      for (i = 0; i < present.length; i++) row.push(csvPrice(m, dec31, present[i].key, scale));
+      row.push(csvPrice(m, dec31, null, scale));
       lines.push(row.join(","));
     }
     return BOM + lines.join("\r\n");
@@ -844,7 +912,6 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     var endY = projEndYear();
     var caution = cautionYear();
     var nowY = currentUtcYear();
-    var offs = (m && m.bandOffsets) || {};
     var mode = h.enabled;
     var html = "";
     var anyBeyond = false;
@@ -876,7 +943,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
         else actualTd = "<td>—</td>";
         lead = "<td>" + y + "</td>" + actualTd;
       }
-      var cells = modelCells(m, dec31, offs, scale);
+      var cells = modelCells(m, dec31, scale);
       var beyond = y > caution;
       if (beyond) anyBeyond = true;
       var rowCls = "yt-row" + (y === nowY ? " yt-now" : "") + (beyond ? " yt-beyond" : "");
@@ -1132,6 +1199,21 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     });
   }
 
+  // A band-mode change only takes effect at the next fit (the bands are computed
+  // during the refit), so a settings save that switched modes starts one itself
+  // instead of leaving the chart showing the old methodology (spec 15.3). A 409 is
+  // tolerated SILENTLY — a run is already in flight and will pick up the new mode.
+  async function autoRefitForBandMode() {
+    toast("Band mode changed — updating the model…", "info");
+    var res = await apiPost("/api/refit", {});
+    if (res.ok || res.status === 409) {
+      userRefitPending = true;
+      jobActive = true; setJobRate(1000); loadJob();
+    } else {
+      toast(res.error || "Could not start model update", "error");
+    }
+  }
+
   // =========================================================================
   //  SETTINGS DRAWER
   // =========================================================================
@@ -1178,7 +1260,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     if (!(s.refitIntervalHours >= 1 && s.refitIntervalHours <= 168)) e.refitIntervalHours = "1–168 hours";
     if (!(s.spotPollMinutes >= 1 && s.spotPollMinutes <= 60)) e.spotPollMinutes = "1–60 minutes";
     if (!(s.projectionEndYear >= 2030 && s.projectionEndYear <= 2055)) e.projectionEndYear = "2030–2055";
-    if (s.bandMode !== "pointInTime" && s.bandMode !== "fullSample") e.bandMode = "invalid band mode";
+    if (s.bandMode !== "pointInTime" && s.bandMode !== "fullSample" && s.bandMode !== "quantileRegression") e.bandMode = "invalid band mode";
     if (s.sourceMode !== "auto" && s.sourceMode !== "manual") e.sourceMode = "invalid source mode";
     if (s.sourceMode === "manual") {
       var en = s.enabledSources;
@@ -1198,6 +1280,9 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     if (form) {
       form.addEventListener("submit", async function (ev) {
         ev.preventDefault();
+        // Remembered before the PUT so a save that switched band methodology can
+        // kick off the refit that actually applies it (spec 15.3).
+        var prevBandMode = settingsCache ? settingsCache.bandMode : null;
         var errBox = $("settingsErrors");
         if (errBox) { errBox.style.display = "none"; errBox.textContent = ""; }
         clearFieldErrors();
@@ -1219,6 +1304,8 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
           renderYearTable();   // projectionEndYear may have changed the row range
           toast("Settings saved", "ok");
           loadStatus();
+          var newBandMode = settingsCache.bandMode || payload.bandMode;
+          if (prevBandMode && newBandMode && newBandMode !== prevBandMode) await autoRefitForBandMode();
         } else {
           if (res.errors && res.errors.length) { applyServerErrors(res.errors); if (errBox) { errBox.textContent = res.errors.join("; "); errBox.style.display = "block"; } }
           else if (errBox) { errBox.textContent = res.error; errBox.style.display = "block"; }
@@ -1287,7 +1374,8 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
       "Both modes draw the same kind of lines: 'price has historically closed below this line X% of the time.' They differ only in how history is scored.",
       "Full-sample: every day in history is compared against today's trend line. Simple, but it judges 2011's prices with a curve fitted on everything through today - hindsight. Because the early years sit far from today's line, the extreme percentiles stretch wider: higher tops and lower floors.",
       "Point-in-time (the default, and porkopolis's current method): each day is compared against the trend as it was fitted using only the data available up to that day - what the model would actually have said at the time, with no hindsight. The extreme percentiles, especially the upper ones, come out tighter.",
-      "Practical effect on the projections: full-sample paints a wider funnel around the trend (more optimistic ceilings, more pessimistic floors); point-in-time paints a narrower, more conservative funnel. Neither is a prediction - the bands describe how far price has historically wandered from trend, nothing more."
+      "Quantile regression (porkopolis's latest method): instead of drawing bands around the trend, each percentile line is its own regression fitted directly to the price history, with its own slope. Because every Bitcoin cycle so far has swung less far from trend than the one before, these lines converge toward the trend as time passes - the funnel narrows.",
+      "Practical effect on the projections: full-sample paints the widest funnel (hindsight stretches the extremes); point-in-time is tighter; quantile regression is different in kind - its funnel narrows over time, so far-future ceilings sit much closer to trend and floors much higher. Parallel bands assume Bitcoin stays as volatile as its whole history; the narrowing funnel assumes the calming trend of the last four cycles continues. Neither is a prediction."
     ],
     yearEndTable: [
       "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",

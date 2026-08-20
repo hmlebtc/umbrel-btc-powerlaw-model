@@ -16,6 +16,7 @@ import {
   currentQuantile,
   falsifiability,
   milestones,
+  quantileFromLines,
   residualsForBands,
   t as tDays,
   trendUsdAt,
@@ -152,11 +153,18 @@ function buildStatus(ctx: AppContext): ApiStatus {
     fairValueNow = trendUsdAt(model.a, model.n, tToday);
     if (spot && spot.usd > 0) {
       deviationPct = ((spot.usd - fairValueNow) / fairValueNow) * 100;
-      // Measure the spot's quantile against the SAME residual set the active
+      // Measure the spot's quantile against the SAME lines/residuals the active
       // bandMode drew its bands from, so the readout and the band the spot sits
-      // in can never disagree (spec section 4).
-      const residuals = residualsForBands(ctx.priceStore.series(), model.a, model.n, model.bandMode);
-      const q = currentQuantile(residuals, model.a, model.n, tToday, spot.usd);
+      // in can never disagree (spec sections 4 and 15.2). In quantileRegression
+      // mode that means the rearranged ladder at today's t; in the other two the
+      // residual set the offsets were taken over.
+      let q: number;
+      if (model.bandMode === 'quantileRegression' && model.bandLines) {
+        q = quantileFromLines(model.bandLines, tToday, spot.usd);
+      } else {
+        const residuals = residualsForBands(ctx.priceStore.series(), model.a, model.n, model.bandMode);
+        q = currentQuantile(residuals, model.a, model.n, tToday, spot.usd);
+      }
       quantile = Number.isFinite(q) ? q : null;
     }
   }
@@ -195,6 +203,9 @@ function buildModel(ctx: AppContext): ApiModel | null {
     sigma: model.sigma,
     bandMode: model.bandMode,
     bandOffsets: model.bandOffsets,
+    // Quantile-regression ladder when the stored fit has one; absent otherwise
+    // (legacy records and the two offset modes are served exactly as before).
+    ...(model.bandLines ? { bandLines: model.bandLines } : {}),
     sample: {
       start: model.dataStart,
       end: model.dataEnd,

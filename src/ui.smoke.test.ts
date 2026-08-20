@@ -200,7 +200,9 @@ test("dashboard has the year-end model table (title, columns, footnote, info)", 
 test("dashboard carries the v0.1.2 verbatim copy phrases (bands + table)", () => {
   const phrases = [
     "with no hindsight",                                    // band-mode help (kept)
-    "more conservative funnel",                             // band-mode help (new)
+    "come out tighter",                                     // band-mode help (kept; the
+                                                            // v0.1.2 "practical effect"
+                                                            // wording was replaced in 15.3)
     "descriptions of the past, not statistical guarantees", // explainer band paragraph (new)
     "the classic porkopolis set",                           // explainer band paragraph (new)
     "December 31st values for every year",                  // year-end table help (new)
@@ -208,6 +210,83 @@ test("dashboard carries the v0.1.2 verbatim copy phrases (bands + table)", () =>
   for (const p of phrases) {
     assert.ok(DASHBOARD_HTML.includes(p), "missing verbatim copy phrase: " + p);
   }
+});
+
+// ===========================================================================
+//  QUANTILE-REGRESSION BAND MODE (spec 15.3, v0.1.6)
+// ===========================================================================
+
+test("settings drawer offers the quantile-regression band mode", () => {
+  assert.ok(
+    DASHBOARD_HTML.includes('<option value="quantileRegression">Quantile regression (porkopolis latest)</option>'),
+    "quantile-regression band-mode option missing from the settings select",
+  );
+  // the two existing modes are untouched
+  assert.ok(DASHBOARD_HTML.includes('<option value="pointInTime">'), "point-in-time option missing");
+  assert.ok(DASHBOARD_HTML.includes('<option value="fullSample">'), "full-sample option missing");
+});
+
+test("band-mode help gains the quantile-regression copy and the rewritten practical effect", () => {
+  // the added paragraph (verbatim markers)
+  assert.ok(
+    DASHBOARD_HTML.includes("its own regression fitted directly"),
+    "quantile-regression band-mode paragraph missing",
+  );
+  assert.ok(DASHBOARD_HTML.includes("the funnel narrows"), "narrowing-funnel wording missing");
+  // the replacement "Practical effect" paragraph, which keeps ONE closing
+  // "Neither is a prediction" (the v0.1.2 sentence that carried it is gone)
+  assert.ok(
+    DASHBOARD_HTML.includes("quantile regression is different in kind"),
+    "rewritten practical-effect paragraph missing",
+  );
+  const occurrences = DASHBOARD_HTML.split("Neither is a prediction").length - 1;
+  assert.equal(occurrences, 1, "expected exactly one 'Neither is a prediction', got " + occurrences);
+  // the superseded v0.1.2 wording is gone
+  assert.ok(
+    !DASHBOARD_HTML.includes("full-sample paints a wider funnel"),
+    "old practical-effect paragraph still present",
+  );
+  assert.ok(!DASHBOARD_HTML.includes("more conservative funnel"), "stale 'more conservative funnel' still present");
+});
+
+test("chart explainer band paragraph gains the quantile-regression sentence", () => {
+  assert.ok(
+    DASHBOARD_HTML.includes(
+      "In quantile-regression mode each dotted line is fitted separately and the funnel narrows over time instead of keeping a constant width.",
+    ),
+    "explainer band paragraph missing the v0.1.6 closing sentence",
+  );
+});
+
+test("a band-mode change auto-refits, and the corner note names the mode", () => {
+  // the auto-refit path: its own helper, the verbatim toast, and the 409 tolerance
+  assert.ok(APP_JS.includes("autoRefitForBandMode"), "auto-refit-on-mode-change helper missing");
+  assert.ok(
+    APP_JS.includes("Band mode changed — updating the model…"),
+    "auto-refit toast copy missing",
+  );
+  assert.ok(APP_JS.includes("res.status === 409"), "auto-refit does not tolerate a 409");
+  // the corner note branch for the new mode (plus the two it must not disturb)
+  assert.ok(APP_JS.includes("bands: quantile regression"), "corner-note quantile-regression branch missing");
+  assert.ok(APP_JS.includes("bands: full-sample percentiles"), "corner-note full-sample branch missing");
+  assert.ok(APP_JS.includes("bands: point-in-time percentiles"), "corner-note point-in-time branch missing");
+  // the client-side settings validator accepts the third mode
+  assert.ok(
+    APP_JS.includes('s.bandMode !== "quantileRegression"'),
+    "client validation still rejects the quantile-regression mode",
+  );
+});
+
+test("band columns are evaluated through one bandLines-aware helper", () => {
+  // the table, the CSV builder and the chart must share the rearrangement logic
+  assert.ok(APP_JS.includes("bandUsdAt"), "shared band-column evaluator missing from APP_JS");
+  assert.ok(APP_JS.includes("bandLinePricesAt"), "monotone-rearrangement helper missing from APP_JS");
+  assert.ok(CHART_JS.includes("qrPricesAt"), "chart engine lacks the rearranged band evaluator");
+  // the old per-cell offset arithmetic is no longer how band columns are computed
+  assert.ok(
+    !APP_JS.includes("csvPrice(m, dec31, offs[present[i].key], scale)"),
+    "CSV builder still evaluates band columns straight from the offsets",
+  );
 });
 
 test("chart tooltip uses percentile labels, never hi/lo wording", () => {
@@ -592,6 +671,77 @@ test("CSV export: holdings mode multiplies price columns by the BTC amount", () 
   const cells = rowStarting(lines, "2020,");
   assert.equal(cells[1], "2", "BTC held column should show the trimmed global amount");
   assert.equal(cells[2], "58000.00", "actual value should be 29000 * 2 held BTC");
+});
+
+// A quantileRegression fit over the same trend: eleven separately-sloped lines,
+// line j offset from trend by delta*(0.9 - 0.2*log10(t)) with delta running -1..+1
+// across the ladder — i.e. a fan that CONVERGES as t grows, the way porkopolis's
+// quantile regressions do. The offsets are carried too (the documented fallback),
+// so a test can prove the builder prefers the lines.
+const QR_LADDER_KEYS = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+const CSV_MODEL_QR = {
+  a: -16.5, n: 5.7, fittedAt: "2026-07-12T09:30:00.000Z",
+  bandMode: "quantileRegression",
+  bandOffsets: CSV_MODEL_FULL.bandOffsets,
+  bandLines: ((): Record<string, { a: number; n: number }> => {
+    const out: Record<string, { a: number; n: number }> = {};
+    QR_LADDER_KEYS.forEach((k, j) => {
+      const delta = (j - 5) / 5;
+      out[k] = { a: -16.5 + delta * 0.9, n: 5.7 - delta * 0.2 };
+    });
+    return out;
+  })(),
+};
+// A stale record: mode set, lines missing -> the parallel offsets must be used.
+const CSV_MODEL_QR_STALE = {
+  a: -16.5, n: 5.7, fittedAt: "2026-07-12T09:30:00.000Z",
+  bandMode: "quantileRegression",
+  bandOffsets: CSV_MODEL_FULL.bandOffsets,
+};
+// 97.5% / Trend for a given year's row (price-mode column layout).
+function upperOverTrend(lines: string[], year: number): number {
+  const cells = rowStarting(lines, year + ",");
+  return Number(at(cells, 11)) / Number(at(cells, -1));
+}
+
+test("CSV export: quantileRegression columns come from the band lines and narrow over time", () => {
+  const build = evalAppCsvBuilder();
+  const { lines: qr } = csvLines(build(CSV_MODEL_QR, CSV_PRICES, NO_HOLD, 2045));
+  const { lines: parallel } = csvLines(build(CSV_MODEL_FULL, CSV_PRICES, NO_HOLD, 2045));
+
+  // parallel offsets: the 97.5% line keeps a CONSTANT multiple of the trend...
+  const p2015 = upperOverTrend(parallel, 2015);
+  const p2045 = upperOverTrend(parallel, 2045);
+  // (tolerance covers only the CSV's own 2-decimal rounding of each cell)
+  assert.ok(Math.abs(p2045 / p2015 - 1) < 1e-4, "offset bands should hold a constant ratio to trend");
+
+  // ...while separately-fitted lines converge toward it
+  const q2015 = upperOverTrend(qr, 2015);
+  const q2045 = upperOverTrend(qr, 2045);
+  assert.ok(q2015 > 1 && q2045 > 1, "the 97.5% column should sit above trend in both years");
+  assert.ok(
+    q2045 < q2015 * 0.85,
+    "quantile-regression funnel did not narrow: 97.5%/trend " + q2015.toFixed(3) + " in 2015 vs " +
+      q2045.toFixed(3) + " in 2045",
+  );
+  // and it is genuinely a different number from the offsets fallback
+  assert.ok(Math.abs(q2045 - p2045) > 1e-6, "quantileRegression export fell back to the offsets");
+});
+
+test("CSV export: a quantileRegression record without bandLines falls back to the offsets", () => {
+  const build = evalAppCsvBuilder();
+  const { header, lines: stale } = csvLines(build(CSV_MODEL_QR_STALE, CSV_PRICES, NO_HOLD, 2045));
+  const { lines: parallel } = csvLines(build(CSV_MODEL_FULL, CSV_PRICES, NO_HOLD, 2045));
+  assert.equal(
+    header,
+    "Year,Actual close,0.5%,2.5%,10%,16.5%,25%,50%,75%,83.5%,90%,97.5%,99.5%,Trend",
+    "stale quantileRegression record should still export every offset column",
+  );
+  assert.equal(
+    JSON.stringify(rowStarting(stale, "2045,")),
+    JSON.stringify(rowStarting(parallel, "2045,")),
+    "stale record did not render identically to the offsets model",
+  );
 });
 
 test("CSV export: one data row per year 2010..projectionEndYear", () => {

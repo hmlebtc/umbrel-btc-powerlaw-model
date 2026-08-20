@@ -37,7 +37,7 @@ services:
   web:
     # Pin the exact released version - never `:latest`, never `v`-prefixed.
     # Bump in lockstep with umbrel-app.yml `version:` on every release.
-    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.5
+    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.6
     restart: on-failure
     stop_grace_period: 30s
     volumes:
@@ -48,5 +48,6 @@ services:
       BPL_REFIT_INTERVAL_HOURS: "12"
       BPL_SPOT_POLL_MINUTES: "5"
       BPL_PROJECTION_END_YEAR: "2045"
+      # Allowed: pointInTime (default) | fullSample | quantileRegression
       BPL_BAND_MODE: pointInTime
       BPL_SOURCE_MODE: auto

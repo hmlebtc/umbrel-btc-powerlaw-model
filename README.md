@@ -38,9 +38,9 @@ default: 0.5% and 99.5% (purple `#AB47BC`, the near-never-breached envelope), 10
 `#FF9800`), 25% and 75% (teal `#26A69A`), and the 50% median (grey `#9E9E9E`, dashed). Clicking any legend
 chip shows or hides that single line - on the chart, in the tooltip, and in the oscillator's guide lines.
 
-Two ways of computing those percentiles are supported, both against the same slope/intercept fit. Both
-modes draw the same kind of line - "price has historically closed below this line X% of the time" - they
-differ only in how history is scored:
+Three ways of computing those percentiles are supported. `fullSample` and `pointInTime` both draw the same
+kind of line - "price has historically closed below this line X% of the time" - and only differ in how
+history is scored; `quantileRegression` is different in kind (see below):
 
 - **`fullSample`** - every day in history is compared against *today's* trend line. Simple, but it judges,
   say, 2011's prices against a curve fitted on everything through today - hindsight. Because the early
@@ -50,11 +50,31 @@ differ only in how history is scored:
   to that day (once at least 730 prior days exist, via an O(1)-updatable expanding-window regression) -
   what the model would actually have said at the time, with no hindsight. The extreme percentiles,
   especially the upper ones, come out tighter.
+- **`quantileRegression`** - mirrors the methodology porkopolis.io has since moved on to (their site now
+  describes the shown percentiles as coming from "a pure quantile regression"). Instead of scoring
+  residuals around one shared trend, each percentile line is **its own regression**, fitted directly to
+  `log10(price)` against `log10(t)` with its own slope, minimizing pinball loss rather than squared error
+  (an iteratively-reweighted least-squares solve, converging deterministically from the OLS fit). Because
+  every Bitcoin cycle so far has swung less far from trend, relative to trend, than the one before it, the
+  extreme lines' slopes come out shallower than the trend's own - so instead of running parallel to the
+  trend forever, the whole band **funnel narrows** as time passes: porkopolis's own published lines go from
+  roughly 10x/43x the trend early on to roughly 1.1x/2.2x by today. Because eleven independently-fitted
+  lines can mathematically cross each other at some `t` even when none of them cross *near* the data, every
+  consumer of this mode - chart, tooltip, oscillator guides, year-end table, CSV export - evaluates the
+  eleven fitted lines at each point in time and then applies **monotone rearrangement**
+  (Chernozhukov-Fernández-Val-Galichon): sort the eleven values and reassign them to the percentile ladder
+  in ascending order. That guarantees the displayed lines never cross, at any `t`, past, present, or out to
+  the projection horizon.
 
-Practical effect on the projections: `fullSample` paints a **wider** funnel around the trend (more
-optimistic ceilings, more pessimistic floors); `pointInTime` paints a **narrower, more conservative**
-funnel. Neither is a prediction - the bands describe how far price has historically wandered from trend,
-nothing more.
+Practical effect on the projections: `fullSample` paints the **widest** funnel around the trend (hindsight
+stretches the extremes); `pointInTime` is **tighter**; `quantileRegression` is different in kind - its
+funnel **narrows over time**, so far-future ceilings sit much closer to trend and floors much higher than
+either of the other two modes would draw. That difference is also the honest trade-off between them: the
+two parallel-band modes assume Bitcoin's price stays about as volatile, *relative to trend*, as it has been
+across its whole history; the narrowing funnel instead assumes the calming trend of the last four halving
+cycles keeps continuing - and four cycles is a small number of data points to be extrapolating a trend
+*of* a trend from. Neither family is a prediction; both describe how far price has historically wandered
+from a fitted curve, nothing more.
 
 On the chart itself, a left-drag now **pans** the visible time window (the cursor turns into a grab hand)
 instead of selecting a zoom range - hold **Shift** while dragging for the old range-select-to-zoom behavior,
@@ -141,7 +161,9 @@ doesn't reset the clock. You can also trigger a refit immediately from the **Upd
 dashboard, which shows a live progress bar (fetch history → fetch spot → reconcile → fit → persist), a
 percentage, and an ETA countdown derived from the last five run durations. Only one refit can run at a
 time - a second request while one is in flight gets a `409` and the dashboard shows "already running"
-instead of queueing a pile-up.
+instead of queueing a pile-up. Changing **Band mode** in the settings drawer also triggers a refit
+automatically, since the band lines it draws (offsets, or the eleven quantile-regression lines) only exist
+once the model has been fit in that mode - no need to remember to press Update Model afterward.
 
 Every refit re-derives the model from the full stored history **plus a provisional point for today, built
 from the current spot median** - so the chart and readouts always reflect the latest price action, not
@@ -187,7 +209,7 @@ dashboard can flag exactly what didn't take.
 | Refit interval (hours) | `refitIntervalHours` | `BPL_REFIT_INTERVAL_HOURS` | `12` (range 1-168) |
 | Spot poll interval (minutes) | `spotPollMinutes` | `BPL_SPOT_POLL_MINUTES` | `5` (range 1-60) |
 | Projection end year | `projectionEndYear` | `BPL_PROJECTION_END_YEAR` | `2045` (range 2030-2055) |
-| Band mode | `bandMode` | `BPL_BAND_MODE` | `pointInTime` (or `fullSample`) |
+| Band mode | `bandMode` | `BPL_BAND_MODE` | `pointInTime` (or `fullSample`, `quantileRegression`) |
 | Source mode | `sourceMode` | `BPL_SOURCE_MODE` | `auto` (or `manual`) |
 | Enabled sources (manual mode only) | `enabledSources.<name>` | - | all `true` |
 | My holdings mode (year-end table) | `holdings.enabled` | - (dashboard only, see note) | `false` |

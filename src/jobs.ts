@@ -437,6 +437,9 @@ export class JobRunner {
         dataEnd: modelFit.dataEnd,
         bandMode: modelFit.bandMode,
         bandOffsets: modelFit.bandOffsets,
+        // Only quantileRegression fits carry a ladder; every other mode persists
+        // the record shape unchanged (spec 15.2).
+        ...(modelFit.bandLines ? { bandLines: modelFit.bandLines } : {}),
         includesProvisionalSpot: modelFit.includesProvisionalSpot,
         durationMs,
       };

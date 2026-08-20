@@ -60,7 +60,7 @@ export interface SourceStatus extends SourceHealth {
 // a source-of-truth coefficient.
 // ---------------------------------------------------------------------------
 
-export type BandMode = 'pointInTime' | 'fullSample';
+export type BandMode = 'pointInTime' | 'fullSample' | 'quantileRegression';
 
 /**
  * Residual-percentile offsets (log10 space) added to the trend line. Eleven
@@ -83,6 +83,41 @@ export interface BandOffsets {
   p90: number;
   p975: number;
   p995: number;
+}
+
+/**
+ * One quantile-regression line in log10 space: `log10(price) = a + n*log10(t)`
+ * (spec section 15.1). Same shape as the trend line, but fitted to a single
+ * percentile of the price history rather than its mean — so each line carries
+ * its OWN slope and the fan can narrow (or widen) with t instead of keeping the
+ * constant width a residual offset implies.
+ */
+export interface BandLine {
+  /** Intercept in log10 space. */
+  a: number;
+  /** Slope / exponent of this percentile's own regression. */
+  n: number;
+}
+
+/**
+ * The eleven quantile-regression lines of the band ladder (spec section 15.1),
+ * keyed exactly like BandOffsets and declared in ascending-percentile order —
+ * the order model.ts's monotone rearrangement assigns sorted values back in.
+ * Present only on fits taken with bandMode `quantileRegression`; records written
+ * before v0.1.6 (or in the other two modes) simply have no `bandLines`.
+ */
+export interface BandLines {
+  p005: BandLine;
+  p025: BandLine;
+  p10: BandLine;
+  p165: BandLine;
+  p25: BandLine;
+  p50: BandLine;
+  p75: BandLine;
+  p835: BandLine;
+  p90: BandLine;
+  p975: BandLine;
+  p995: BandLine;
 }
 
 /** Falsifiability guards recomputed each fit (spec section 4). */
@@ -144,6 +179,8 @@ export interface ModelFit {
   dataEnd: string;
   bandMode: BandMode;
   bandOffsets: BandOffsets;
+  /** Quantile-regression ladder — only in bandMode `quantileRegression`. */
+  bandLines?: BandLines;
   includesProvisionalSpot: boolean;
 }
 
@@ -160,6 +197,12 @@ export interface FitRecord {
   dataEnd: string;
   bandMode: BandMode;
   bandOffsets: BandOffsets;
+  /**
+   * Quantile-regression ladder (v0.1.6+, bandMode `quantileRegression` only).
+   * Absent on every other record — consumers must guard on presence and fall
+   * back to the `bandOffsets` path.
+   */
+  bandLines?: BandLines;
   includesProvisionalSpot: boolean;
   /** Wall-clock milliseconds the fit's owning job took. */
   durationMs: number;
@@ -322,6 +365,8 @@ export interface ApiModel {
   sigma: number;
   bandMode: BandMode;
   bandOffsets: BandOffsets;
+  /** Present only when the served fit carries a quantile-regression ladder. */
+  bandLines?: BandLines;
   sample: { start: string; end: string; count: number; includesProvisionalSpot: boolean };
   projection: { endYear: number; cautionAfterYear: number };
   falsifiability: Falsifiability;

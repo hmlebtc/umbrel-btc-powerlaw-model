@@ -357,6 +357,128 @@ test('GET /api/model: serves a pre-v0.1.2 8-key bandOffsets record as-is (backwa
 });
 
 // ---------------------------------------------------------------------------
+// v0.1.6 quantile-regression mode (spec 15.2): the ladder crosses the API and
+// drives the quantile readout; records without one keep the old paths.
+// ---------------------------------------------------------------------------
+
+const LADDER_KEYS = ['p005', 'p025', 'p10', 'p165', 'p25', 'p50', 'p75', 'p835', 'p90', 'p975', 'p995'];
+
+test('bandMode=quantileRegression: /api/model carries the 11-line ladder, quantile stays sane', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      // Switch modes through the real HTTP surface, then refit.
+      const put = await putJSON(baseUrl, '/api/settings', { bandMode: 'quantileRegression' });
+      assert.equal(put.status, 200);
+      assert.equal(ctx.settings.get().bandMode, 'quantileRegression');
+      await runRefit(ctx);
+
+      const { status, body } = await getJSON(baseUrl, '/api/model');
+      assert.equal(status, 200);
+      assert.equal(body.data.bandMode, 'quantileRegression');
+
+      // Eleven separately-sloped lines, keyed like bandOffsets.
+      const lines = body.data.bandLines;
+      assert.ok(lines, 'quantileRegression model must serve bandLines');
+      assert.deepEqual(Object.keys(lines), LADDER_KEYS);
+      for (const key of LADDER_KEYS) {
+        assert.equal(typeof lines[key].a, 'number');
+        assert.equal(typeof lines[key].n, 'number');
+      }
+      // Non-parallel: the upper line is flatter than the trend, the lower steeper.
+      assert.ok(lines.p975.n < body.data.n);
+      assert.ok(lines.p025.n > body.data.n);
+
+      // The documented fallback survives: offsets are still served in full.
+      for (const key of LADDER_KEYS) assert.equal(typeof body.data.bandOffsets[key], 'number');
+
+      // currentQuantile now comes from the ladder — clamped to [0.5, 99.5].
+      const status2 = await getJSON(baseUrl, '/api/status');
+      const q = status2.body.data.currentQuantile;
+      assert.equal(typeof q, 'number');
+      assert.ok(q >= 0.5 && q <= 99.5, `currentQuantile=${q}`);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('GET /api/model: a record without bandLines is served as-is (legacy + stale QR)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-nolines-model-'));
+  try {
+    // Two records that carry NO ladder: a v0.1.5 pointInTime fit, and a record
+    // whose bandMode says quantileRegression but predates / lost its bandLines
+    // (hand-edited model.json). Neither may crash, and neither may grow a
+    // bandLines key on the way out.
+    const offsets = {
+      p005: -0.72, p025: -0.5, p10: -0.35, p165: -0.2, p25: -0.12, p50: 0,
+      p75: 0.12, p835: 0.2, p90: 0.29, p975: 0.5, p995: 0.72,
+    };
+    for (const bandMode of ['pointInTime', 'quantileRegression']) {
+      writeFileSync(
+        join(dir, 'model.json'),
+        JSON.stringify({
+          current: {
+            fittedAt: '2026-06-01T00:00:00.000Z',
+            a: -16.8,
+            n: 5.7,
+            A: Math.pow(10, -16.8),
+            r2: 0.95,
+            sigma: 0.28,
+            points: 5900,
+            dataStart: '2010-07-18',
+            dataEnd: '2026-05-31',
+            bandMode,
+            bandOffsets: offsets,
+            includesProvisionalSpot: false,
+            durationMs: 1234,
+          },
+          history: [],
+        }),
+      );
+
+      const settings = new SettingsStore(dir, defaultSettings());
+      const getSettings = () => settings.get();
+      const registry = new SourceRegistry(createMockSources());
+      const priceStore = new PriceStore();
+      const modelStore = new ModelStore(dir); // loads the ladder-less record
+      const jobStats = new JobStats();
+      const events = new EventLog();
+      const spot = new SpotAggregator(registry, getSettings);
+      const jobRunner = new JobRunner({ registry, priceStore, spot, getSettings, modelStore, jobStats, events });
+      const ctx: AppContext = {
+        settings,
+        priceStore,
+        modelStore,
+        spot,
+        jobRunner,
+        registry,
+        events,
+        mock: true,
+        startedAt: new Date().toISOString(),
+        version: '0.1.6',
+        gitSha: 'test-sha',
+      };
+      assert.equal(modelStore.current()!.bandLines, undefined);
+
+      await withServer(ctx, async (baseUrl) => {
+        const { status, body } = await getJSON(baseUrl, '/api/model');
+        assert.equal(status, 200, bandMode);
+        assert.equal(body.ok, true);
+        assert.equal(body.data.bandMode, bandMode);
+        assert.ok(!('bandLines' in body.data), `unexpected bandLines for a ${bandMode} record`);
+        assert.deepEqual(body.data.bandOffsets, offsets);
+        // The status readout falls back to the residual path without throwing.
+        const st = await getJSON(baseUrl, '/api/status');
+        assert.equal(st.status, 200);
+      });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // /api/prices.
 // ---------------------------------------------------------------------------
 

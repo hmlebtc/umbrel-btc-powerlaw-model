@@ -52,6 +52,15 @@ test('validateSettings: out-of-range spotPollMinutes and projectionEndYear rever
   assert.equal(b.settings.projectionEndYear, 2045);
 });
 
+test('validateSettings: every bandMode of spec 15.2 is accepted', () => {
+  for (const mode of ['pointInTime', 'fullSample', 'quantileRegression'] as const) {
+    const { errors, resetFields, settings } = validateSettings(withDefaults({ bandMode: mode }));
+    assert.deepEqual(errors, [], `bandMode=${mode}`);
+    assert.deepEqual(resetFields, []);
+    assert.equal(settings.bandMode, mode);
+  }
+});
+
 test('validateSettings: invalid bandMode / sourceMode revert to default', () => {
   const a = validateSettings(withDefaults({ bandMode: 'nonsense' as unknown as Settings['bandMode'] }));
   assert.ok(a.resetFields.includes('bandMode'));
@@ -140,6 +149,28 @@ test('seedSettingsFromEnv: reads BPL_* and normalises invalid values', () => {
 
   const bad = seedSettingsFromEnv({ BPL_REFIT_INTERVAL_HOURS: '999' } as NodeJS.ProcessEnv);
   assert.equal(bad.refitIntervalHours, 12); // out of range -> default
+});
+
+test('seedSettingsFromEnv: BPL_BAND_MODE seeds quantileRegression (spec 15.2)', () => {
+  const seeded = seedSettingsFromEnv({ BPL_BAND_MODE: 'quantileRegression' } as NodeJS.ProcessEnv);
+  assert.equal(seeded.bandMode, 'quantileRegression');
+
+  // An unknown mode still falls back to the default rather than persisting.
+  const bogus = seedSettingsFromEnv({ BPL_BAND_MODE: 'quantile' } as NodeJS.ProcessEnv);
+  assert.equal(bogus.bandMode, 'pointInTime');
+});
+
+test('SettingsStore: quantileRegression bandMode round-trips through disk', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const store = new SettingsStore(dir, defaultSettings());
+    assert.equal(store.update({ bandMode: 'quantileRegression' }).ok, true);
+    assert.equal(store.get().bandMode, 'quantileRegression');
+    // Persisted, and it survives a reload (the load path must accept it too).
+    assert.equal(loadSettings(dir).bandMode, 'quantileRegression');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.5"
+version: "0.1.6"
 tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
@@ -31,6 +31,19 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.1.6 - a third band mode: quantile regression, matching porkopolis's latest methodology.
+
+  The Settings drawer's Band mode picker gains a third option, "Quantile regression (porkopolis
+  latest)". Instead of drawing percentile lines around one shared trend, each percentile gets its
+  own regression fitted directly to the price history, with its own slope - the resulting funnel
+  narrows over time instead of staying a constant width, because every Bitcoin cycle so far has
+  swung less far from trend than the one before it. A monotone-rearrangement step guarantees the
+  displayed lines never cross at any point in time, even out at the 2045 projection. Switching to
+  (or away from) this mode automatically triggers a model update so the chart, oscillator, and
+  year-end table pick it up immediately - no manual "Update Model" press needed. No data or
+  settings migration needed; existing installs pick this up on their next update, still defaulting
+  to point-in-time.
+
   v0.1.5 - export the year-end table to CSV.
 
   The year-end model table gains an "Export CSV" button in its header, next to the Price / My holdings

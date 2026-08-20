@@ -56,7 +56,7 @@ const SPOT_SOURCE_KEYS: Array<keyof EnabledSources> = [
   'coingecko',
 ];
 
-const BAND_MODES: BandMode[] = ['pointInTime', 'fullSample'];
+const BAND_MODES: BandMode[] = ['pointInTime', 'fullSample', 'quantileRegression'];
 const SOURCE_MODES: SourceMode[] = ['auto', 'manual'];
 
 // ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ export function validateSettings(input: Settings): ValidationResult {
     reset('projectionEndYear', 'projectionEndYear must be an integer between 2030 and 2055');
   }
   if (!BAND_MODES.includes(c.bandMode)) {
-    reset('bandMode', "bandMode must be 'pointInTime' or 'fullSample'");
+    reset('bandMode', `bandMode must be one of ${BAND_MODES.map((m) => `'${m}'`).join(', ')}`);
   }
   if (!SOURCE_MODES.includes(c.sourceMode)) {
     reset('sourceMode', "sourceMode must be 'auto' or 'manual'");

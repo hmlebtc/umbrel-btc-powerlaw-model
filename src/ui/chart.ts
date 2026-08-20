@@ -19,6 +19,17 @@
 // re-sampled at ~2px resolution across the FULL domain (data start -> Dec 31 of
 // projectionEndYear) so the curves stay smooth in any x/y mode and under any zoom.
 //
+// v0.1.6 (spec 15.3) adds a THIRD band methodology. When the fit says
+// bandMode=quantileRegression AND carries bandLines, each percentile is its own
+// fitted line (its own slope) rather than a parallel offset, so the band price is
+//   band price k:          10 ^ (a_k + n_k*log10(t))
+// evaluated per x and then MONOTONE-REARRANGED across the ladder (sort the eleven
+// values ascending, hand them back in ascending-tau order) — a faithful replica of
+// the backend's bandPricesAt(). Every consumer here (lines, fills, tooltip rows,
+// tooltip quantile, oscillator guides, autoscale) reads through that one helper, so
+// the drawn ladder can never cross. Any other mode — or a stale record that claims
+// the mode but has no usable bandLines — keeps the unchanged parallel-offset path.
+//
 // Marker: PLCHART_ENGINE
 
 export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
@@ -79,6 +90,13 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     { off: "p005", pct: "0.5%",  color: "#AB47BC", dash: [2, 3], def: false }
   ];
 
+  // The ladder's band keys in ASCENDING-tau order (0.5% -> 99.5%) and the matching
+  // percentages. This is the order the monotone rearrangement hands sorted values
+  // back in, and the order the quantile interpolation walks (mirrors the backend
+  // BAND_KEYS / BAND_TAUS).
+  var QR_LADDER = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+  var QR_PCTS = [0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5];
+
   // Symmetric same-colour percentile pairs (outermost first). Band-fill shades
   // the region between a pair's two lines, but ONLY when BOTH lines are visible.
   // The 50% median is a lone line and has no fill. Opacities grade outermost-faintest.
@@ -99,7 +117,11 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   // ---- controller state ---------------------------------------------------
   var els = null;            // { main, mctx, osc, octx, tip, wrap, oscWrap }
-  var model = null;          // { a, n, off:{p005..p995}, projEnd, caution, bandMode }
+  var model = null;          // { a, n, off:{p005..p995}, lines:{p005..p995}|null, projEnd, caution, bandMode }
+  // Per-frame memo of the rearranged quantile-regression prices, keyed by timestamp.
+  // Every line, fill, guide and tooltip asks for the same x grid, so one sort per x
+  // per frame is enough. Cleared at the top of every draw().
+  var qrCache = {};
   var prices = [];           // [{ t:ms, v:usd, flag:0|1 }] sorted by t
   var priceStart = null, priceEnd = null, provisional = null;
   var spot = null;           // { usd, at } — optional marker at today
@@ -202,10 +224,47 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function trendAt(ms) { return Math.pow(10, trendLogAt(ms)); }
   function bandAt(ms, off) { return Math.pow(10, trendLogAt(ms) + off); }
 
-  // A percentile line is present only when its offset exists as a finite number
-  // in the loaded model (older fits lack the newer keys -> those lines no-op).
+  // ---- band values --------------------------------------------------------
+  // True while the loaded fit carries usable quantile-regression band lines.
+  function qrOn() { return !!(model && model.lines); }
+
+  // The rearranged band prices at a timestamp (quantile-regression mode only):
+  // evaluate every present line at t, sort the values ascending, and hand them back
+  // to the present ladder keys in ascending-tau order — the monotone rearrangement
+  // (Chernozhukov-Fernandez-Val-Galichon) the backend's bandPricesAt() applies, so
+  // the ladder can never cross at any t even where the raw fits do.
+  function qrPricesAt(ms) {
+    var hit = qrCache[ms];
+    if (hit) return hit;
+    var lg = log10(daysCont(ms));
+    var keys = [], vals = [], i, ln;
+    for (i = 0; i < QR_LADDER.length; i++) {
+      ln = model.lines[QR_LADDER[i]];
+      if (!ln) continue;
+      keys.push(QR_LADDER[i]);
+      vals.push(Math.pow(10, ln.a + ln.n * lg));
+    }
+    vals.sort(function (p, q) { return p - q; });
+    var out = {};
+    for (i = 0; i < keys.length; i++) out[keys[i]] = vals[i];
+    qrCache[ms] = out;
+    return out;
+  }
+
+  // The single band evaluator every consumer goes through: the rearranged
+  // quantile-regression price in that mode, the parallel trend+offset otherwise.
+  function bandValueAt(ms, key) {
+    if (qrOn()) return qrPricesAt(ms)[key];
+    return bandAt(ms, model.off[key]);
+  }
+  function bandFn(key) { return function (ms) { return bandValueAt(ms, key); }; }
+
+  // A percentile line is present only when the loaded model can evaluate it: its
+  // own fitted line in quantileRegression mode, otherwise a finite offset (older
+  // fits lack the newer keys -> those lines no-op).
   function linePresent(off) {
     if (!model) return false;
+    if (model.lines) return !!model.lines[off];
     var v = model.off[off];
     return typeof v === "number" && isFinite(v);
   }
@@ -235,6 +294,29 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     return { lo: lo, hi: hi };
   }
 
+  // The quantile-regression twin of outerOffsets(): the lowest and highest VISIBLE
+  // ladder keys (falling back to the present ones). Because the rearranged values
+  // are ascending in ladder order at EVERY x, those two lines bound every visible
+  // line everywhere — so framing the axes only needs to sample them.
+  function outerKeys() {
+    var lo = null, hi = null, i, k;
+    for (i = 0; i < QR_LADDER.length; i++) {
+      k = QR_LADDER[i];
+      if (!offVisible(k)) continue;
+      if (lo === null) lo = k;
+      hi = k;
+    }
+    if (lo === null) {
+      for (i = 0; i < QR_LADDER.length; i++) {
+        k = QR_LADDER[i];
+        if (!linePresent(k)) continue;
+        if (lo === null) lo = k;
+        hi = k;
+      }
+    }
+    return { lo: lo, hi: hi };
+  }
+
   // =========================================================================
   //  AUTOSCALE — choose the price y-domain that fits the current view
   // =========================================================================
@@ -243,12 +325,15 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function autoscaleY() {
     if (!model) { yDom = { min: 1, max: 1e6 }; return; }
     var lo = Infinity, hi = -Infinity, i;
-    var ob = outerOffsets();
+    // Envelope: a constant offset pair in the parallel modes, the outer ladder
+    // lines sampled per x when the bands are separately-sloped.
+    var ok = qrOn() ? outerKeys() : null;
+    var ob = (ok && ok.lo) ? null : outerOffsets();
     var N = 100;
     for (i = 0; i <= N; i++) {
       var ms = view.min + (view.max - view.min) * (i / N);
-      var low = bandAt(ms, ob.lo);
-      var high = bandAt(ms, ob.hi);
+      var low = ob ? bandAt(ms, ob.lo) : bandValueAt(ms, ok.lo);
+      var high = ob ? bandAt(ms, ob.hi) : bandValueAt(ms, ok.hi);
       if (low < lo) lo = low;
       if (high > hi) hi = high;
     }
@@ -272,7 +357,22 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function autoscaleOsc() {
     // ratio domain wide enough for the visible line multipliers and the data
     var lo = 0.3, hi = 3;
-    if (model) {
+    if (model && qrOn()) {
+      // separately-sloped lines: the guide ratios move with x, so sample the two
+      // outer ladder curves across the view instead of reading a flat multiplier
+      var ok = outerKeys();
+      if (ok.lo) {
+        var qLo = Infinity, qHi = -Infinity, N = 60, k, msq, rLo, rHi;
+        for (k = 0; k <= N; k++) {
+          msq = view.min + (view.max - view.min) * (k / N);
+          rLo = bandValueAt(msq, ok.lo) / trendAt(msq);
+          rHi = bandValueAt(msq, ok.hi) / trendAt(msq);
+          if (rLo > 0 && rLo < qLo) qLo = rLo;
+          if (rHi > qHi) qHi = rHi;
+        }
+        if (isFinite(qLo) && isFinite(qHi) && qLo > 0) { lo = qLo; hi = qHi; }
+      }
+    } else if (model) {
       var ob = outerOffsets();
       if (!(ob.lo === 0 && ob.hi === 0)) { lo = Math.pow(10, ob.lo); hi = Math.pow(10, ob.hi); }
     }
@@ -328,6 +428,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   function draw() {
     if (!els) return;
+    qrCache = {};   // one rearrangement per x per frame
     layout();
     autoscaleY();
     if (G.oOn) autoscaleOsc();
@@ -508,18 +609,18 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   }
 
   // Each visible percentile line is ONE polyline in its own colour. The 50%
-  // median is drawn dashed; every other percentile is dotted. Lines whose offset
-  // key is absent (old fits) or toggled off via the legend are skipped cleanly.
+  // median is drawn dashed; every other percentile is dotted. Lines the model
+  // cannot evaluate (old fits) or toggled off via the legend are skipped cleanly.
+  // The per-x value comes from bandFn(), so parallel offsets and separately-sloped
+  // quantile-regression lines draw through the very same sampler.
   function drawBands(ctx) {
     ctx.lineWidth = 1.4;
     for (var i = 0; i < BAND_LINES.length; i++) {
       var bl = BAND_LINES[i];
       if (!offVisible(bl.off)) continue;
-      var off = model.off[bl.off];
       ctx.setLineDash(bl.dash);
       ctx.strokeStyle = bl.color;
-      // samplePath runs synchronously, so the closed-over off is always current.
-      samplePath(ctx, function (ms) { return bandAt(ms, off); });
+      samplePath(ctx, bandFn(bl.off));
       ctx.stroke();
     }
     ctx.setLineDash([]);
@@ -532,18 +633,20 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     for (var i = 0; i < FILL_PAIRS.length; i++) {
       var fp = FILL_PAIRS[i];
       if (!offVisible(fp.lo) || !offVisible(fp.hi)) continue;
-      fillBetween(ctx, model.off[fp.lo], model.off[fp.hi], fp.fill);
+      fillBetween(ctx, fp.lo, fp.hi, fp.fill);
     }
   }
-  function fillBetween(ctx, offLo, offHi, color) {
+  // Fill between two ladder lines, sampled per x through the shared evaluator so a
+  // narrowing quantile-regression fan fills its true (non-parallel) shape.
+  function fillBetween(ctx, loKey, hiKey, color) {
     var step = 2, px;
     ctx.beginPath();
     for (px = G.ml; px <= G.ml + G.mw + 0.01; px += step) {
-      var y = yToPx(bandAt(pxToMs(px), offHi));
+      var y = yToPx(bandValueAt(pxToMs(px), hiKey));
       if (px === G.ml) ctx.moveTo(px, y); else ctx.lineTo(px, y);
     }
     for (px = G.ml + G.mw; px >= G.ml - 0.01; px -= step) {
-      ctx.lineTo(px, yToPx(bandAt(pxToMs(px), offLo)));
+      ctx.lineTo(px, yToPx(bandValueAt(pxToMs(px), loKey)));
     }
     ctx.closePath();
     ctx.fillStyle = color;
@@ -717,6 +820,30 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     return 50;
   }
 
+  // Quantile in quantileRegression mode (mirrors the backend quantileFromLines):
+  // where the hovered price sits among the rearranged ladder values at this x, tau
+  // linearly interpolated in log10 price space between the two bracketing lines and
+  // clamped to the ladder's own outer levels [0.5, 99.5].
+  function quantileFromLinesAt(ms, usd) {
+    if (!(usd > 0)) return NaN;
+    var prices = qrPricesAt(ms), vals = [], pcts = [], i, v;
+    for (i = 0; i < QR_LADDER.length; i++) {
+      v = prices[QR_LADDER[i]];
+      if (typeof v === "number" && isFinite(v) && v > 0) { vals.push(v); pcts.push(QR_PCTS[i]); }
+    }
+    if (!vals.length) return NaN;
+    var y = log10(usd);
+    if (y <= log10(vals[0])) return clamp(pcts[0], 0.5, 99.5);
+    for (i = 1; i < vals.length; i++) {
+      var loY = log10(vals[i - 1]), hiY = log10(vals[i]);
+      if (y <= hiY) {
+        var span = hiY - loY, w = span > 0 ? (y - loY) / span : 0;
+        return clamp(pcts[i - 1] + w * (pcts[i] - pcts[i - 1]), 0.5, 99.5);
+      }
+    }
+    return clamp(pcts[pcts.length - 1], 0.5, 99.5);
+  }
+
   function updateTooltip(ms, pricePt, px) {
     if (!els.tip) return;
     var tl = trendLogAt(ms), trend = Math.pow(10, tl);
@@ -724,10 +851,10 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     rows.push(row("Date", fmtDate(ms) + "  (t=" + dayIndex(ms) + ")", C.axis));
     if (pricePt) {
       var dev = (pricePt.v / trend - 1) * 100;
-      var q = residualQuantile(log10(pricePt.v) - tl);
+      var q = qrOn() ? quantileFromLinesAt(ms, pricePt.v) : residualQuantile(log10(pricePt.v) - tl);
       rows.push(row("Price", fmtUSD(pricePt.v) + (pricePt.flag === 1 ? " (prov.)" : ""), C.price));
       rows.push(row("Deviation", (dev >= 0 ? "+" : "") + dev.toFixed(1) + "%", dev >= 0 ? C.outer : C.inner));
-      rows.push(row("Quantile", q.toFixed(1) + "%", C.axis));
+      if (isFinite(q)) rows.push(row("Quantile", q.toFixed(1) + "%", C.axis));
     }
     // Every visible percentile line plus the Trend, merged and sorted by dollar
     // value descending. Each row is labelled by its percentile ("97.5%") or
@@ -736,7 +863,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     for (vi = 0; vi < BAND_LINES.length; vi++) {
       var bl = BAND_LINES[vi];
       if (!offVisible(bl.off)) continue;
-      items.push({ label: bl.pct, val: bandAt(ms, model.off[bl.off]), color: bl.color });
+      items.push({ label: bl.pct, val: bandValueAt(ms, bl.off), color: bl.color });
     }
     items.push({ label: "Trend", val: trend, color: C.trend });
     items.sort(function (a, b) { return b.val - a.val; });
@@ -768,21 +895,16 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     var W = els.osc.clientWidth, H = els.osc.clientHeight;
     ctx.clearRect(0, 0, W, H);
     if (!model) return;
-    // guide lines: 1.0 plus the multiplier (10^offset) of every VISIBLE line
-    var guides = [{ r: 1, col: "rgba(236,236,236,0.4)", dash: [] }];
+    // Guides: the 1.0x trend line plus every VISIBLE percentile line. With parallel
+    // offsets a percentile sits at a constant multiple (10^offset), so its guide is
+    // a flat line; with separately-sloped quantile-regression lines the ratio moves
+    // with x, so the guide becomes a per-x CURVE (rearranged band value / trend).
+    oscGuide(ctx, 1, "rgba(236,236,236,0.4)", []);
     for (var pi = 0; pi < BAND_LINES.length; pi++) {
       var bl = BAND_LINES[pi];
       if (!offVisible(bl.off)) continue;
-      guides.push({ r: Math.pow(10, model.off[bl.off]), col: bl.color, dash: bl.dash });
-    }
-    for (var g = 0; g < guides.length; g++) {
-      var gy = oscToPx(guides[g].r);
-      if (gy < G.ot || gy > G.ot + G.oh) continue;
-      ctx.save(); ctx.setLineDash(guides[g].dash); ctx.strokeStyle = guides[g].col; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(G.ml, gy); ctx.lineTo(G.ml + G.mw, gy); ctx.stroke(); ctx.restore();
-      ctx.fillStyle = guides[g].col; ctx.font = "9px ui-monospace, monospace";
-      ctx.textAlign = "right"; ctx.textBaseline = "middle";
-      ctx.fillText(guides[g].r === 1 ? "1.0x" : (trimNum(guides[g].r) + "x"), G.ml - 6, gy);
+      if (qrOn()) oscCurve(ctx, bl);
+      else oscGuide(ctx, Math.pow(10, model.off[bl.off]), bl.color, bl.dash);
     }
     // ratio line, coloured green below 1 / red above 1
     ctx.save();
@@ -810,6 +932,44 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
       ctx.save(); ctx.setLineDash([3, 3]); ctx.strokeStyle = C.cross; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(hx, G.ot); ctx.lineTo(hx, G.ot + G.oh); ctx.stroke(); ctx.restore();
     }
+  }
+
+  // One flat oscillator guide at ratio r, labelled in the left gutter.
+  function oscGuide(ctx, r, col, dash) {
+    var gy = oscToPx(r);
+    if (gy < G.ot || gy > G.ot + G.oh) return;
+    ctx.save(); ctx.setLineDash(dash); ctx.strokeStyle = col; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(G.ml, gy); ctx.lineTo(G.ml + G.mw, gy); ctx.stroke(); ctx.restore();
+    ctx.fillStyle = col; ctx.font = "9px ui-monospace, monospace";
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    ctx.fillText(r === 1 ? "1.0x" : (trimNum(r) + "x"), G.ml - 6, gy);
+  }
+
+  // One oscillator guide CURVE for a separately-sloped percentile line: its
+  // rearranged band value divided by the trend, sampled at ~2px across the plot
+  // width and clipped to the oscillator rect. The gutter label shows the ratio at
+  // the left edge of the view, since it is no longer a single number.
+  function oscCurve(ctx, bl) {
+    var step = 2, started = false, px, ms, y;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(G.ml, G.ot, G.mw, G.oh); ctx.clip();
+    ctx.setLineDash(bl.dash); ctx.strokeStyle = bl.color; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (px = G.ml; px <= G.ml + G.mw + 0.01; px += step) {
+      ms = pxToMs(px);
+      y = oscToPx(bandValueAt(ms, bl.off) / trendAt(ms));
+      if (!isFinite(y)) { started = false; continue; }
+      if (!started) { ctx.moveTo(px, y); started = true; } else { ctx.lineTo(px, y); }
+    }
+    ctx.stroke();
+    ctx.restore();
+    var msL = pxToMs(G.ml);
+    var r0 = bandValueAt(msL, bl.off) / trendAt(msL);
+    var ly = oscToPx(r0);
+    if (!isFinite(ly) || ly < G.ot || ly > G.ot + G.oh) return;
+    ctx.fillStyle = bl.color; ctx.font = "9px ui-monospace, monospace";
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    ctx.fillText(trimNum(r0) + "x", G.ml - 6, ly);
   }
 
   // =========================================================================
@@ -997,6 +1157,23 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     scheduleDraw();
   }
 
+  // Quantile-regression band lines (v0.1.6): eleven {a,n} pairs, one per ladder
+  // key. Adopted ONLY when the fit declares bandMode=quantileRegression and carries
+  // at least one finite line; a stale record (mode set, lines missing or garbage)
+  // returns null so the parallel bandOffsets path renders instead.
+  function readBandLines(m) {
+    if (!m || m.bandMode !== "quantileRegression" || !m.bandLines) return null;
+    var out = {}, any = false, i, ln;
+    for (i = 0; i < QR_LADDER.length; i++) {
+      ln = m.bandLines[QR_LADDER[i]];
+      if (!ln || typeof ln.a !== "number" || !isFinite(ln.a)) continue;
+      if (typeof ln.n !== "number" || !isFinite(ln.n)) continue;
+      out[QR_LADDER[i]] = { a: ln.a, n: ln.n };
+      any = true;
+    }
+    return any ? out : null;
+  }
+
   function setModel(m) {
     if (!m) { model = null; scheduleDraw(); return; }
     var off = m.bandOffsets || {};
@@ -1009,6 +1186,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
         p25: off.p25, p50: off.p50, p75: off.p75, p835: off.p835,
         p90: off.p90, p975: off.p975, p995: off.p995
       },
+      lines: readBandLines(m),
       bandMode: m.bandMode,
       projEnd: (m.projection && m.projection.endYear) || 2045,
       caution: (m.projection && m.projection.cautionAfterYear) || 2040

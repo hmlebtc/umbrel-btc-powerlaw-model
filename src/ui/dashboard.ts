@@ -364,7 +364,7 @@ const PAGE_BODY: string = String.raw`</span>
     </div>
     <div class="chart-explain" id="explainPanel" style="display:none">
       <p>The green line is Bitcoin's actual daily price; the ring at the end is the live price for today, which isn't final until the day closes. The white line is the power-law trend fitted to the entire history - it is refit from scratch at every update, so it can shift slightly as new data arrives.</p>
-      <p>The dotted lines are percentiles of the model's own history: price has historically closed below the 97.5% line on 97.5% of all days, below the 16.5% line on only 16.5% of days, and so on. The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set; open 'More bands' in the legend to add others, including the 50% median. They are descriptions of the past, not statistical guarantees about the future.</p>
+      <p>The dotted lines are percentiles of the model's own history: price has historically closed below the 97.5% line on 97.5% of all days, below the 16.5% line on only 16.5% of days, and so on. The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set; open 'More bands' in the legend to add others, including the 50% median. They are descriptions of the past, not statistical guarantees about the future. In quantile-regression mode each dotted line is fitted separately and the funnel narrows over time instead of keeping a constant width.</p>
       <p>Left of the 'today' line is history; right of it is the same formula extended forward. The hatched area past ~2040 is where the model's own authors say it should not be trusted. Halving lines mark Bitcoin's supply-cut events (dashed ones are estimates).</p>
       <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to move around the chart, hold Shift and drag to select a range to zoom into, scroll to zoom at the cursor, and double-click to reset the view.</p>
     </div>
@@ -521,6 +521,7 @@ const PAGE_BODY: string = String.raw`</span>
               <select id="cfg_bandMode">
                 <option value="pointInTime">Point-in-time (porkopolis post-2025)</option>
                 <option value="fullSample">Full-sample percentiles</option>
+                <option value="quantileRegression">Quantile regression (porkopolis latest)</option>
               </select>
               <div class="field-err" id="err_bandMode"></div>
             </div>

@@ -429,6 +429,146 @@ test("4-key (legacy) offsets draw exactly four band lines and never throw", () =
 });
 
 // ===========================================================================
+//  QUANTILE-REGRESSION BAND LINES (spec 15.3, v0.1.6)
+// ===========================================================================
+// In this mode the server sends eleven separately-fitted {a,n} lines instead of
+// eleven parallel offsets, and the chart must evaluate each one per x (with the
+// monotone rearrangement) rather than sliding the trend up and down by a constant.
+// The observable difference is geometric: parallel offsets keep a CONSTANT vertical
+// pixel gap between two lines on a log y-axis, separately-sloped lines do not.
+
+const QR_LADDER = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"] as const;
+
+// A synthetic, deliberately NON-parallel ladder around the real fixture fit: line j
+// sits at trend + delta*(0.9 - 0.2*log10(t)) in log10 space, delta running -1..+1
+// across the ladder. The spread shrinks as t grows — a converging fan like the one
+// porkopolis's quantile regressions produce — and stays strictly ordered over the
+// whole 2010..2045 domain, so the eleven lines are eleven distinct polylines.
+function syntheticBandLines(): Record<string, { a: number; n: number }> {
+  const out: Record<string, { a: number; n: number }> = {};
+  for (let j = 0; j < QR_LADDER.length; j++) {
+    const delta = (j - 5) / 5;
+    out[QR_LADDER[j] as string] = { a: FIT.a + delta * 0.9, n: FIT.n - delta * 0.2 };
+  }
+  return out;
+}
+const QR_MODEL_PAYLOAD = {
+  ...MODEL_PAYLOAD,
+  bandMode: "quantileRegression",
+  bandLines: syntheticBandLines(),
+};
+// A stale record: the mode is set but the fit predates it and carries no lines.
+const QR_STALE_MODEL_PAYLOAD = { ...MODEL_PAYLOAD, bandMode: "quantileRegression" };
+
+const ALL_BANDS_ON: Record<string, boolean> = (() => {
+  const o: Record<string, boolean> = {};
+  for (const k of QR_LADDER) o[k] = true;
+  return o;
+})();
+
+// Every polyline stroked while a band colour was live, in draw order — which is the
+// engine's BAND_LINES order, 99.5% first down to 0.5% last. Points are the (x,y) CSS
+// px pairs the engine actually emitted, so a test can measure the vertical distance
+// between two lines at any sample index.
+function bandPolylines(ctx: RecordingCtx): Array<Array<[number, number]>> {
+  const out: Array<Array<[number, number]>> = [];
+  let cur: string | null = null;
+  let pts: Array<[number, number]> = [];
+  for (const e of ctx.seq) {
+    if (e.kind === "set" && e.prop === "strokeStyle") cur = String(e.value);
+    else if (e.kind === "call" && e.m === "beginPath") pts = [];
+    else if (e.kind === "call" && (e.m === "moveTo" || e.m === "lineTo")) {
+      const x = e.args[0];
+      const y = e.args[1];
+      if (typeof x === "number" && typeof y === "number") pts.push([x, y]);
+    } else if (e.kind === "call" && e.m === "stroke") {
+      if (cur !== null && BAND_COLORS.indexOf(cur) >= 0 && pts.length > 1) out.push(pts);
+      pts = [];
+    }
+  }
+  return out;
+}
+function polyAt(lines: Array<Array<[number, number]>>, i: number): Array<[number, number]> {
+  const l = lines[i];
+  assert.ok(l, "no band polyline at draw index " + i);
+  return l;
+}
+function yAt(line: Array<[number, number]>, k: number): number {
+  const p = line[k];
+  assert.ok(p, "polyline has no sample at index " + k);
+  return p[1];
+}
+
+// (9) The whole point of the mode: eleven lines that are NOT parallel ------------
+test("quantileRegression bandLines draw eleven percentile lines whose gaps change across x", () => {
+  const h = runPaint({ bands: ALL_BANDS_ON }, QR_MODEL_PAYLOAD);
+
+  const bands = countBandPolylines(h.mainCtx);
+  assert.equal(bands, 11, "expected 11 percentile polylines from bandLines, got " + bands);
+
+  const lines = bandPolylines(h.mainCtx);
+  assert.equal(lines.length, 11, "expected 11 recorded band polylines, got " + lines.length);
+  const top = polyAt(lines, 0);   // 99.5% — drawn first
+  const bottom = polyAt(lines, 10); // 0.5% — drawn last
+  assert.equal(top.length, bottom.length, "the two lines were not sampled on the same x grid");
+  assert.ok(top.length > 100, "too few samples to measure a gap: " + top.length);
+
+  const last = top.length - 1;
+  const gapLeft = Math.abs(yAt(top, 0) - yAt(bottom, 0));
+  const gapRight = Math.abs(yAt(top, last) - yAt(bottom, last));
+  assert.ok(gapLeft > 2 && gapRight > 0, "degenerate gaps (" + gapLeft + " / " + gapRight + ")");
+  assert.ok(
+    gapRight < gapLeft * 0.75,
+    "the funnel did not narrow: gap " + gapLeft.toFixed(2) + "px at the left edge vs " +
+      gapRight.toFixed(2) + "px at the right — the lines drew parallel",
+  );
+
+  // …and the oscillator guides follow: in this mode each visible percentile is a
+  // per-x ratio CURVE, not the flat two-point multiplier line the offset modes draw.
+  // (The price/trend ratio line itself is stroked as many 2-point segments, so the
+  // length filter isolates the guides.)
+  const oscGuides = bandPolylines(h.oscCtx).filter((l) => l.length > 50);
+  assert.ok(oscGuides.length > 0, "no per-x oscillator guide curves were drawn");
+  const guide = polyAt(oscGuides, 0);
+  const ys = guide.map((p) => p[1]);
+  assert.ok(Math.max(...ys) - Math.min(...ys) > 1, "an oscillator guide drew flat (not a per-x curve)");
+});
+
+// (10) …while the offsets modes keep drawing the parallel ladder unchanged -------
+test("an offsets-only model still draws parallel percentile lines", () => {
+  const h = runPaint({ bands: ALL_BANDS_ON });   // fullSample offsets fixture model
+  const lines = bandPolylines(h.mainCtx);
+  assert.equal(lines.length, 11, "expected 11 recorded band polylines, got " + lines.length);
+  const top = polyAt(lines, 0);
+  const bottom = polyAt(lines, 10);
+  assert.equal(top.length, bottom.length, "the two lines were not sampled on the same x grid");
+
+  // On a log y-axis a constant log10 offset difference is a constant pixel gap.
+  const gaps: number[] = [];
+  for (const k of [0, Math.floor(top.length / 3), Math.floor((2 * top.length) / 3), top.length - 1]) {
+    gaps.push(Math.abs(yAt(top, k) - yAt(bottom, k)));
+  }
+  const spread = Math.max(...gaps) - Math.min(...gaps);
+  assert.ok(gaps[0] !== undefined && (gaps[0] as number) > 2, "degenerate parallel gap: " + gaps.join(","));
+  assert.ok(spread < 1e-6, "offset bands drifted out of parallel (gaps " + gaps.join(", ") + ")");
+});
+
+// (11) Stale record guard: mode set, no bandLines -> offsets rendering, no throw ---
+test("a quantileRegression record without bandLines falls back to offsets rendering", () => {
+  let err: unknown = null;
+  let res: PaintResult | null = null;
+  try {
+    res = runPaint(undefined, QR_STALE_MODEL_PAYLOAD);
+  } catch (e) {
+    err = e;
+  }
+  assert.equal(err, null, "painting a bandLines-less quantileRegression record threw: " + String(err));
+  assert.ok(res, "no paint result for the stale quantileRegression model");
+  const bands = countBandPolylines((res as PaintResult).mainCtx);
+  assert.equal(bands, 4, "stale record should fall back to the four default offset lines, got " + bands);
+});
+
+// ===========================================================================
 //  INTERACTION HARNESS  (drag-to-pan / range-zoom / touch)  — v0.1.3-pre
 // ===========================================================================
 // The paint tests above prove draw() runs under the synchronous-rAF stub, which
