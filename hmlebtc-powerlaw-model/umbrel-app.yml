@@ -6,7 +6,7 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.6"
+version: "0.1.7"
 tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
@@ -31,6 +31,20 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.1.7 - an outermost 0.01% / 99.99% envelope pair, porkopolis's Q0/Q100 lines.
+
+  The band ladder gains one more pair at the very outside: 0.01% and 99.99% (magenta), off by
+  default under the legend's "More bands" expander like the other extras. With roughly 5,800
+  daily points in the fitted history, these two percentiles fall below what the data can
+  actually resolve (1 in ~5,800 is about 0.017%), so in practice they land at, or barely inside,
+  the single lowest and highest price the series has ever recorded - the same role porkopolis's
+  own Q0 (minimum) and Q100 (maximum) lines play on their chart. Treat them as reference rails
+  rather than statistical bands: each is anchored by a small handful of the most extreme days in
+  Bitcoin's history, not a broad sample. They're computed the same way as every other line - full
+  participants in whichever band mode is active, including quantile regression's monotone
+  rearrangement, so they still never cross the lines inside them. No data or settings migration
+  needed; existing installs pick this up on their next update, still off by default.
+
   v0.1.6 - a third band mode: quantile regression, matching porkopolis's latest methodology.
 
   The Settings drawer's Band mode picker gains a third option, "Quantile regression (porkopolis

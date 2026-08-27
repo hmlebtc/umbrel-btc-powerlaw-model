@@ -135,12 +135,15 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   var RANGES = { "full": 1, "history": 1, "4y": 1, "1y": 1, "6m": 1 };
 
   // Per-percentile band-visibility keys mirror the chart engine's BAND_LINES
-  // "off" keys (v0.1.2 individual lines). Defaults reproduce the classic four:
-  // 2.5/16.5/83.5/97.5% on, every other percentile off.
-  var BAND_KEYS = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+  // "off" keys (v0.1.2 individual lines; the 0.01/99.99% envelope pair added in
+  // v0.1.7). Defaults reproduce the classic four: 2.5/16.5/83.5/97.5% on, every
+  // other percentile off. Stored prefs written before a key existed simply lack it,
+  // and migrateBands leaves those at the default below — so the new pair needs NO
+  // migration, only its two explicit false defaults.
+  var BAND_KEYS = ["p0001", "p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995", "p9999"];
   function defaultBands() {
-    return { p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
-             p75: false, p835: true, p90: false, p975: true, p995: false };
+    return { p0001: false, p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+             p75: false, p835: true, p90: false, p975: true, p995: false, p9999: false };
   }
   // v0.1.1 -> v0.1.2 migration (spec 12.1, REVISED after Fable review). The old
   // prefs.bands used pair keys {50,67,95,99}. ONLY the classic-four pairs carry
@@ -321,8 +324,9 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   }
 
   // ---- "More bands" expander (v0.1.2) -------------------------------------
-  // Reveals the second chip row (the non-default percentiles incl. the 50%
-  // median). Open/closed state persisted in prefs.moreBands (default collapsed).
+  // Reveals the second chip row (the non-default percentiles incl. the 50% median
+  // and the 0.01/99.99% envelope pair that brackets it since v0.1.7). Open/closed
+  // state persisted in prefs.moreBands (default collapsed).
   function wireMoreBands() {
     var btn = $("moreBandsToggle");
     if (!btn) return;
@@ -620,7 +624,7 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   // bandPricesAt() does; in every other mode — and for a stale record that claims
   // the mode but carries no usable bandLines — the value is the parallel
   // trend + offset. Ladder order matches the backend BAND_KEYS.
-  var QR_LADDER = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+  var QR_LADDER = ["p0001", "p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995", "p9999"];
   function bandLinesOf(m) {
     if (!(m && m.bandMode === "quantileRegression" && m.bandLines)) return null;
     var out = {}, any = false, i, ln;
@@ -806,11 +810,12 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
   // =========================================================================
   //  YEAR-END TABLE CSV EXPORT (v0.1.5, spec 14 — client-side, no API change)
   // =========================================================================
-  // Ascending percentile columns for the export, 0.5% -> 99.5%. This is the FULL
+  // Ascending percentile columns for the export, 0.01% -> 99.99%. This is the FULL
   // superset (every line in a current fit), not the on-screen default four; the
   // builder keeps only the percentiles whose offset key exists in the given model
   // (legacy fits export what they have), and Trend is always the LAST column.
   var CSV_PCTS = [
+    { key: "p0001", label: "0.01%" },
     { key: "p005", label: "0.5%" },
     { key: "p025", label: "2.5%" },
     { key: "p10",  label: "10%" },
@@ -821,7 +826,8 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     { key: "p835", label: "83.5%" },
     { key: "p90",  label: "90%" },
     { key: "p975", label: "97.5%" },
-    { key: "p995", label: "99.5%" }
+    { key: "p995", label: "99.5%" },
+    { key: "p9999", label: "99.99%" }
   ];
   // One numeric price cell for the CSV: raw number, 2 decimals, no currency symbol /
   // thousand separators; empty when the column is unavailable in this fit. Values

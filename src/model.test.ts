@@ -20,6 +20,7 @@ import {
   milestones,
   percentile,
   pointInTimeResiduals,
+  QR_MAX_ITERATIONS,
   quantileFromLines,
   residualsForBands,
   t,
@@ -151,12 +152,14 @@ test('computeBandOffsets: pointInTime degrades to fullSample when sample is shor
 });
 
 // ---------------------------------------------------------------------------
-// v0.1.2 band fan: eleven individually-labelled percentile lines (spec 12.1).
-// 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5. p10/p50/p90 are the
-// pure v0.1.2 addition over the eight v0.1.1 keys.
+// v0.1.2 band fan, widened by the v0.1.7 envelope pair (spec 12.1 + 16.1):
+// thirteen individually-labelled percentile lines at
+// 0.01, 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5, 99.99.
+// p10/p50/p90 were the v0.1.2 addition over the eight v0.1.1 keys; p0001/p9999
+// are the v0.1.7 addition and bracket the whole ladder.
 // ---------------------------------------------------------------------------
 
-test('computeBandOffsets: exposes all eleven keys, non-decreasing in ascending-p order', () => {
+test('computeBandOffsets: exposes all thirteen keys, non-decreasing in ascending-p order', () => {
   const sample = syntheticPowerLaw({
     a: -16.5,
     n: 5.69,
@@ -168,16 +171,18 @@ test('computeBandOffsets: exposes all eleven keys, non-decreasing in ascending-p
   const f = fitOLS(sample);
   const bands = computeBandOffsets(f, sample, 'pointInTime');
 
-  // All eleven percentiles are present (pure addition over the v0.1.1 eight keys).
+  // All thirteen percentiles are present (pure addition over the v0.1.2 eleven).
   assert.deepEqual(
     Object.keys(bands).sort(),
-    ['p005', 'p025', 'p10', 'p165', 'p25', 'p50', 'p75', 'p835', 'p90', 'p975', 'p995'].sort(),
+    ['p0001', 'p005', 'p025', 'p10', 'p165', 'p25', 'p50', 'p75', 'p835', 'p90', 'p975', 'p995', 'p9999'].sort(),
   );
 
   // Offsets are monotonically non-decreasing in ascending percentile order:
-  // 0.5 < 2.5 < 10 < 16.5 < 25 < 50 < 75 < 83.5 < 90 < 97.5 < 99.5 — the key
-  // order here is deliberately by percentile value, not lexicographic key order.
+  // 0.01 < 0.5 < 2.5 < 10 < 16.5 < 25 < 50 < 75 < 83.5 < 90 < 97.5 < 99.5 < 99.99
+  // — the key order here is deliberately by percentile value, not lexicographic
+  // key order.
   const inPOrder = [
+    bands.p0001,
     bands.p005,
     bands.p025,
     bands.p10,
@@ -189,6 +194,7 @@ test('computeBandOffsets: exposes all eleven keys, non-decreasing in ascending-p
     bands.p90,
     bands.p975,
     bands.p995,
+    bands.p9999,
   ];
   for (let i = 1; i < inPOrder.length; i++) {
     assert.ok(
@@ -199,6 +205,8 @@ test('computeBandOffsets: exposes all eleven keys, non-decreasing in ascending-p
   // Symmetric noise: the inner pair straddles zero and the outer pair is widest.
   assert.ok(bands.p25 < 0 && bands.p75 > 0);
   assert.ok(bands.p005 < bands.p025 && bands.p975 < bands.p995);
+  // The v0.1.7 envelope pair sits strictly outside the previous outermost pair.
+  assert.ok(bands.p0001 < bands.p005 && bands.p995 < bands.p9999);
 });
 
 test('computeBandOffsets: p50 (median) of symmetric residuals sits ~0', () => {
@@ -226,6 +234,7 @@ test('computeBandOffsets: each key maps to its percentile of the banded residual
   // so the mapping key->percentile can be checked to floating-point equality.
   const residuals = residualsForBands(sample, f.a, f.n, 'fullSample');
   const bands = computeBandOffsets(f, sample, 'fullSample');
+  assert.equal(bands.p0001, percentile(residuals, 0.01));
   assert.equal(bands.p005, percentile(residuals, 0.5));
   assert.equal(bands.p025, percentile(residuals, 2.5));
   assert.equal(bands.p10, percentile(residuals, 10));
@@ -237,6 +246,7 @@ test('computeBandOffsets: each key maps to its percentile of the banded residual
   assert.equal(bands.p90, percentile(residuals, 90));
   assert.equal(bands.p975, percentile(residuals, 97.5));
   assert.equal(bands.p995, percentile(residuals, 99.5));
+  assert.equal(bands.p9999, percentile(residuals, 99.99));
 });
 
 test('percentile: hand-computed p005/p995 with interpolation on a small vector', () => {
@@ -395,7 +405,7 @@ test('(15.1-1) fitBandLines: a noiseless power law is recovered by every tau to 
   const sample = syntheticPowerLaw({ a: A_INTERCEPT, n: N_EXP, startT: 1, count: 2500, noiseSigma: 0 });
   const lines = fitBandLines(sample);
 
-  // All eleven ladder keys, declared in ascending-tau order.
+  // All thirteen ladder keys, declared in ascending-tau order.
   assert.deepEqual(Object.keys(lines), BAND_KEYS);
   for (const key of BAND_KEYS) {
     const line = lines[key];
@@ -497,7 +507,12 @@ test('(15.1-5) real fixture: the quantile funnel narrows toward trend', () => {
   assert.ok(late > 1, `p975/trend=${late} at dataEnd should stay above 1`);
 });
 
-/** Eleven flat (n=0) lines at 10^0 .. 10^10 — exact, hand-checkable ladder values. */
+/**
+ * One flat (n=0) line per ladder key at 10^0, 10^1, ... — exact, hand-checkable
+ * values. Index i of BAND_KEYS is worth exactly 10^i at every t, so the expected
+ * interpolation results below are derived from BAND_KEYS.indexOf rather than
+ * from a frozen ladder length.
+ */
 function flatLadder(order: 'ascending' | 'descending' = 'ascending'): BandLines {
   const out = {} as Record<BandKey, BandLine>;
   BAND_KEYS.forEach((key, i) => {
@@ -509,19 +524,26 @@ function flatLadder(order: 'ascending' | 'descending' = 'ascending'): BandLines 
 test('(15.1-6) quantileFromLines: bracketing interpolation, clamping and edge cases', () => {
   const ladder = flatLadder(); // value of key i is exactly 10^i at every t
   const TD = 1234;
+  /** log10 price sitting exactly on the line for `key`. */
+  const rung = (key: BandKey): number => BAND_KEYS.indexOf(key);
 
-  // On a line -> that line's own percentile (p50 is ladder index 5 -> 10^5).
-  assert.equal(quantileFromLines(ladder, TD, Math.pow(10, 5)), BAND_TAUS.p50 * 100);
-  assert.equal(quantileFromLines(ladder, TD, Math.pow(10, 9)), BAND_TAUS.p975 * 100);
+  // On a line -> that line's own percentile.
+  assert.equal(quantileFromLines(ladder, TD, Math.pow(10, rung('p50'))), BAND_TAUS.p50 * 100);
+  assert.equal(quantileFromLines(ladder, TD, Math.pow(10, rung('p975'))), BAND_TAUS.p975 * 100);
 
   // Half-way between p50 (50%) and p75 (75%) in log10 price -> 62.5%.
-  assert.ok(Math.abs(quantileFromLines(ladder, TD, Math.pow(10, 5.5)) - 62.5) < 1e-9);
+  const halfway = (rung('p50') + rung('p75')) / 2;
+  assert.ok(Math.abs(quantileFromLines(ladder, TD, Math.pow(10, halfway)) - 62.5) < 1e-9);
   // A quarter of the way from p165 (16.5%) to p25 (25%) -> 18.625%.
-  assert.ok(Math.abs(quantileFromLines(ladder, TD, Math.pow(10, 3.25)) - 18.625) < 1e-9);
+  const quarter = rung('p165') + 0.25 * (rung('p25') - rung('p165'));
+  assert.ok(Math.abs(quantileFromLines(ladder, TD, Math.pow(10, quarter)) - 18.625) < 1e-9);
 
-  // Clamped to the ladder's own outer levels, never 0 or 100.
-  assert.equal(quantileFromLines(ladder, TD, 1e-9), 0.5);
-  assert.equal(quantileFromLines(ladder, TD, 1e30), 99.5);
+  // Clamped to the ladder's own outer levels — the v0.1.7 envelope pair, so
+  // [0.01, 99.99] rather than the old [0.5, 99.5]. Still never 0 or 100.
+  assert.equal(quantileFromLines(ladder, TD, 1e-9), 0.01);
+  assert.equal(quantileFromLines(ladder, TD, 1e30), 99.99);
+  assert.equal(quantileFromLines(ladder, TD, 1e-9), BAND_TAUS.p0001 * 100);
+  assert.ok(Math.abs(quantileFromLines(ladder, TD, 1e30) - BAND_TAUS.p9999 * 100) < 1e-9);
 
   // Non-positive price / pre-genesis t -> NaN (the readout shows nothing).
   assert.ok(Number.isNaN(quantileFromLines(ladder, TD, 0)));
@@ -544,7 +566,7 @@ test('(15.1-6) quantileFromLines: on the real fixture it is bounded and rises wi
   let previous = -Infinity;
   for (const mult of [0.05, 0.25, 0.5, 0.8, 1, 1.5, 3, 20]) {
     const q = quantileFromLines(lines, td, trend * mult);
-    assert.ok(q >= 0.5 && q <= 99.5, `q=${q} outside [0.5,99.5] at ${mult}x trend`);
+    assert.ok(q >= 0.01 && q <= 99.99, `q=${q} outside [0.01,99.99] at ${mult}x trend`);
     assert.ok(q >= previous, `quantile fell from ${previous} to ${q} as price rose`);
     previous = q;
   }
@@ -589,4 +611,170 @@ test('fit: quantileRegression attaches the ladder and keeps fullSample offsets a
   // The two offset modes carry no ladder at all.
   assert.equal(full.bandLines, undefined);
   assert.equal(fit(FIXTURE_SAMPLE, 'pointInTime').bandLines, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// v0.1.7 envelope pair (spec 16.1): 0.01% / 99.99%. With ~5,800 daily points
+// these taus sit BELOW the sample's own 1/N ~ 0.017% resolution, so they are not
+// meaningful coverage levels — they are the historical floor/ceiling envelopes
+// (porkopolis's Q0/Q100). Every assertion below is therefore an ENVELOPE
+// property (how few points escape the line), never a coverage share.
+// ---------------------------------------------------------------------------
+
+/** Points strictly outside a fitted line, in log10 space with a 1e-9 tolerance. */
+const ENVELOPE_LOG_TOLERANCE = 1e-9;
+
+/** How many fixture points may escape an envelope line (spec 16.1). */
+const ENVELOPE_MAX_ESCAPES = 3;
+
+function countOutside(
+  sample: readonly DailyObservation[],
+  priceAt: (tDays: number) => number,
+  side: 'below' | 'above',
+): number {
+  let count = 0;
+  for (const obs of sample) {
+    const td = t(obs.date);
+    if (td < 1 || !(obs.usd > 0)) continue;
+    const y = Math.log10(obs.usd);
+    const lineY = Math.log10(priceAt(td));
+    if (side === 'below' ? y < lineY - ENVELOPE_LOG_TOLERANCE : y > lineY + ENVELOPE_LOG_TOLERANCE) {
+      count++;
+    }
+  }
+  return count;
+}
+
+test('(16.1) envelope property: the real fixture barely escapes the p0001/p9999 lines', () => {
+  // The whole justification for the pair: at tau 0.0001 / 0.9999 on 5,806 points
+  // the fitted lines are effectively min/max envelopes, so essentially NOTHING
+  // may sit outside them. Asserted against both the raw fitted lines and the
+  // rearranged ladder values every consumer actually draws.
+  const qr = fit(FIXTURE_SAMPLE, 'quantileRegression');
+  const lines = qr.bandLines as BandLines;
+  assert.equal(FIXTURE_SAMPLE.length, 5806, 'the pinned fixture is the 5,806-point snapshot');
+  assert.equal(qr.points, 5806);
+
+  const rawBelow = countOutside(
+    FIXTURE_SAMPLE,
+    (td) => trendUsdAt(lines.p0001.a, lines.p0001.n, td),
+    'below',
+  );
+  const rawAbove = countOutside(
+    FIXTURE_SAMPLE,
+    (td) => trendUsdAt(lines.p9999.a, lines.p9999.n, td),
+    'above',
+  );
+  assert.ok(rawBelow <= ENVELOPE_MAX_ESCAPES, `${rawBelow} of 5806 points below the p0001 line`);
+  assert.ok(rawAbove <= ENVELOPE_MAX_ESCAPES, `${rawAbove} of 5806 points above the p9999 line`);
+
+  // Same property through bandPricesAt (the rearranged values the chart, tooltip,
+  // oscillator, year-end table and CSV all read).
+  const reBelow = countOutside(FIXTURE_SAMPLE, (td) => bandPricesAt(lines, td).p0001, 'below');
+  const reAbove = countOutside(FIXTURE_SAMPLE, (td) => bandPricesAt(lines, td).p9999, 'above');
+  assert.ok(reBelow <= ENVELOPE_MAX_ESCAPES, `${reBelow} points below the rearranged p0001`);
+  assert.ok(reAbove <= ENVELOPE_MAX_ESCAPES, `${reAbove} points above the rearranged p9999`);
+
+  // The envelope is genuinely OUTSIDE the previous outermost pair, not a
+  // duplicate of it (which would make the counts above trivially true).
+  const inner = countOutside(FIXTURE_SAMPLE, (td) => bandPricesAt(lines, td).p005, 'below');
+  assert.ok(inner > reBelow, `p005 should be escaped more often (${inner}) than p0001 (${reBelow})`);
+});
+
+test('(16.1) QR: the extreme taus finish inside the iteration cap and hold the envelope', () => {
+  // Coverage is meaningless below 1/N, so the assertion is the envelope property,
+  // NOT a share of points. The converged flag is deliberately not asserted: an
+  // extreme tau is allowed to exhaust the cap as long as the line it lands on
+  // still envelopes the data.
+  const { xs, ys } = columns(FIXTURE_SAMPLE);
+  for (const [key, side] of [
+    ['p0001', 'below'],
+    ['p9999', 'above'],
+  ] as const) {
+    const q = fitQuantileLine(xs, ys, BAND_TAUS[key] as number);
+    assert.ok(
+      q.iterations >= 1 && q.iterations <= QR_MAX_ITERATIONS,
+      `${key}: ${q.iterations} iterations outside [1, ${QR_MAX_ITERATIONS}]`,
+    );
+    assert.ok(Number.isFinite(q.a) && Number.isFinite(q.n), `${key}: non-finite fit`);
+    const escapes = countOutside(FIXTURE_SAMPLE, (td) => trendUsdAt(q.a, q.n, td), side);
+    assert.ok(escapes <= ENVELOPE_MAX_ESCAPES, `${key}: ${escapes} points ${side} the line`);
+  }
+});
+
+test('(16.1) offsets modes: p0001/p9999 interpolate just inside the extreme residuals', () => {
+  // In the two residual modes the pair is a plain percentile of the residual set.
+  // At N=5806 the p=0.01 rank is 0.58, so the value lands BETWEEN the two lowest
+  // order statistics — a near-minimum, and never below the minimum itself.
+  const TINY = 0.02; // log10 units; sigma is ~0.3, so this is a small fraction of it
+  const ols = fitOLS(FIXTURE_SAMPLE);
+  for (const mode of ['fullSample', 'pointInTime'] as const) {
+    const offsets = computeBandOffsets(ols, FIXTURE_SAMPLE, mode);
+    assert.equal(Object.keys(offsets).length, 13, `${mode}: 13 offsets expected`);
+    const sorted = [...residualsForBands(FIXTURE_SAMPLE, ols.a, ols.n, mode)].sort((p, q) => p - q);
+    const min = sorted[0] as number;
+    const secondMin = sorted[1] as number;
+    const max = sorted[sorted.length - 1] as number;
+    const secondMax = sorted[sorted.length - 2] as number;
+
+    // Near-min: at or above the minimum, at or below the next order statistic,
+    // and within a tiny epsilon of the minimum.
+    assert.ok(offsets.p0001 >= min, `${mode}: p0001=${offsets.p0001} below min=${min}`);
+    assert.ok(offsets.p0001 <= secondMin, `${mode}: p0001=${offsets.p0001} above 2nd min=${secondMin}`);
+    assert.ok(offsets.p0001 <= min + TINY, `${mode}: p0001=${offsets.p0001} not within ${TINY} of ${min}`);
+
+    // Symmetric near-max at the top of the ladder.
+    assert.ok(offsets.p9999 <= max, `${mode}: p9999=${offsets.p9999} above max=${max}`);
+    assert.ok(offsets.p9999 >= secondMax, `${mode}: p9999=${offsets.p9999} below 2nd max=${secondMax}`);
+    assert.ok(offsets.p9999 >= max - TINY, `${mode}: p9999=${offsets.p9999} not within ${TINY} of ${max}`);
+
+    // And it brackets the whole ladder, strictly.
+    assert.ok(offsets.p0001 < offsets.p005 && offsets.p995 < offsets.p9999, `${mode}: not bracketing`);
+  }
+});
+
+test('(16.1) the thirteen-rung rearranged ladder is non-decreasing at dataEnd and 2045', () => {
+  const ols = fitOLS(FIXTURE_SAMPLE);
+  const lines = fitBandLines(FIXTURE_SAMPLE);
+  assert.equal(BAND_KEYS.length, 13);
+  assert.equal(BAND_KEYS[0], 'p0001');
+  assert.equal(BAND_KEYS[BAND_KEYS.length - 1], 'p9999');
+
+  for (const td of [t(ols.dataEnd), t('2045-12-31')]) {
+    const prices = bandPricesAt(lines, td);
+    const values = BAND_KEYS.map((k) => prices[k]);
+    assert.equal(values.length, 13);
+    for (let i = 1; i < values.length; i++) {
+      assert.ok(
+        (values[i] as number) >= (values[i - 1] as number),
+        `t=${td}: ${BAND_KEYS[i - 1]}=${values[i - 1]} > ${BAND_KEYS[i]}=${values[i]}`,
+      );
+    }
+    // After rearrangement the envelope pair IS the ladder's floor and ceiling.
+    assert.equal(prices.p0001, Math.min(...values));
+    assert.equal(prices.p9999, Math.max(...values));
+  }
+});
+
+test('(16.1) determinism: the thirteen-rung ladder and offsets are bit-identical across runs', () => {
+  const copy = FIXTURE_SAMPLE.map((o) => ({ ...o }));
+  const first = fit(FIXTURE_SAMPLE, 'quantileRegression');
+  const second = fit(copy, 'quantileRegression');
+
+  const a = first.bandLines as BandLines;
+  const b = second.bandLines as BandLines;
+  for (const key of BAND_KEYS) {
+    assert.ok(Object.is(a[key].a, b[key].a), `${key}.a drifted`);
+    assert.ok(Object.is(a[key].n, b[key].n), `${key}.n drifted`);
+    assert.ok(Object.is(first.bandOffsets[key], second.bandOffsets[key]), `${key} offset drifted`);
+  }
+  assert.equal(JSON.stringify(first.bandLines), JSON.stringify(second.bandLines));
+  assert.equal(JSON.stringify(first.bandOffsets), JSON.stringify(second.bandOffsets));
+
+  // The extreme taus in particular, straight through fitQuantileLine (iteration
+  // count and converged flag included — they are part of the deterministic output).
+  const { xs, ys } = columns(FIXTURE_SAMPLE);
+  for (const tau of [BAND_TAUS.p0001 as number, BAND_TAUS.p9999 as number]) {
+    assert.deepEqual(fitQuantileLine(xs, ys, tau), fitQuantileLine(xs, ys, tau));
+  }
 });

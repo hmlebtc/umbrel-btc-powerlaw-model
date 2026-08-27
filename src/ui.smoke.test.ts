@@ -88,18 +88,25 @@ test("dashboard has the per-percentile legend with a More-bands expander", () =>
     assert.ok(DASHBOARD_HTML.includes('id="lg_' + key + '"'), "default legend chip lg_" + key + " missing");
     assert.ok(DASHBOARD_HTML.includes('data-band="' + key + '"'), "default legend chip data-band " + key + " missing");
   }
-  // ...and the seven non-default chips (incl. the 50% median) live in the expander row
-  for (const key of ["p005", "p10", "p25", "p50", "p75", "p90", "p995"]) {
+  // ...and the nine non-default chips (incl. the 50% median and the v0.1.7
+  // 0.01/99.99% envelope pair) live in the expander row
+  for (const key of ["p0001", "p005", "p10", "p25", "p50", "p75", "p90", "p995", "p9999"]) {
     assert.ok(DASHBOARD_HTML.includes('id="lg_' + key + '"'), "expander legend chip lg_" + key + " missing");
+    assert.ok(DASHBOARD_HTML.includes('data-band="' + key + '"'), "expander legend chip data-band " + key + " missing");
   }
   // the "More bands" expander chip + its revealed row
   assert.ok(DASHBOARD_HTML.includes('id="moreBandsToggle"'), "More-bands expander toggle missing");
   assert.ok(DASHBOARD_HTML.includes('id="moreBandsRow"'), "More-bands expander row missing");
   assert.ok(DASHBOARD_HTML.includes("More bands"), "More-bands expander label missing");
   // percentile labels are shown on the chips
-  for (const label of ["2.5%", "16.5%", "83.5%", "97.5%", "0.5%", "50%", "99.5%"]) {
+  for (const label of ["2.5%", "16.5%", "83.5%", "97.5%", "0.5%", "50%", "99.5%", "0.01%", "99.99%"]) {
     assert.ok(DASHBOARD_HTML.includes(">" + label + "<"), "legend chip label " + label + " missing");
   }
+  // the envelope pair's magenta hue: on its two chip swatches and in the engine's
+  // own BAND_LINES table (both inlined into the page)
+  assert.ok(DASHBOARD_HTML.includes("background:#e91e63"), "envelope chip swatch colour missing");
+  assert.ok(DASHBOARD_HTML.includes("#E91E63"), "engine magenta band colour #E91E63 missing");
+  assert.ok(CHART_JS.includes("#E91E63"), "CHART_JS BAND_LINES lacks the magenta envelope colour");
   // Price and Trend static indicators are present too
   assert.ok(DASHBOARD_HTML.includes('id="chartLegend"'), "legend row container missing");
   assert.ok(DASHBOARD_HTML.includes('aria-pressed="true"'), "default chips missing aria-pressed");
@@ -255,6 +262,66 @@ test("chart explainer band paragraph gains the quantile-regression sentence", ()
       "In quantile-regression mode each dotted line is fitted separately and the funnel narrows over time instead of keeping a constant width.",
     ),
     "explainer band paragraph missing the v0.1.6 closing sentence",
+  );
+});
+
+// ===========================================================================
+//  0.01% / 99.99% ENVELOPE PAIR (spec 16.2, v0.1.7)
+// ===========================================================================
+
+test("chart explainer band paragraph gains the v0.1.7 envelope-pair sentences", () => {
+  assert.ok(
+    DASHBOARD_HTML.includes(
+      "The outermost 0.01% and 99.99% lines are effectively Bitcoin's historical floor and ceiling - touched only on the most extreme days in fifteen years - so they are driven by a handful of events. Treat them as reference rails, not statistical bands.",
+    ),
+    "explainer band paragraph missing the v0.1.7 envelope-pair copy",
+  );
+  // the distinctive closing phrase, spelled out on its own
+  assert.ok(
+    DASHBOARD_HTML.includes("reference rails, not statistical bands"),
+    "envelope-pair caveat phrase missing",
+  );
+  // it is APPENDED: the v0.1.6 sentence still closes the same paragraph before it
+  const qrIdx = DASHBOARD_HTML.indexOf("instead of keeping a constant width.");
+  const railsIdx = DASHBOARD_HTML.indexOf("The outermost 0.01% and 99.99% lines");
+  assert.ok(qrIdx >= 0 && railsIdx > qrIdx, "envelope copy did not land after the v0.1.6 sentence");
+});
+
+test("the ladder constants carry the envelope pair first and last", () => {
+  // chart engine: BAND_LINES draws 99.99% first / 0.01% last, and the ascending
+  // ladder the rearrangement walks brackets every other key
+  assert.ok(CHART_JS.includes('{ off: "p9999", pct: "99.99%"'), "CHART_JS BAND_LINES missing the 99.99% line");
+  assert.ok(CHART_JS.includes('{ off: "p0001", pct: "0.01%"'), "CHART_JS BAND_LINES missing the 0.01% line");
+  assert.ok(
+    CHART_JS.includes('var QR_LADDER = ["p0001", "p005"') && CHART_JS.includes('"p995", "p9999"]'),
+    "CHART_JS QR_LADDER does not bracket the ladder with p0001 / p9999",
+  );
+  // …and the same pair joins the same-colour fill map
+  assert.ok(
+    CHART_JS.includes('{ lo: "p0001", hi: "p9999"'),
+    "CHART_JS FILL_PAIRS missing the envelope fill pair",
+  );
+  // app: the visibility keys and the CSV column ladder agree with it
+  assert.ok(
+    APP_JS.includes('var BAND_KEYS = ["p0001", "p005"') && APP_JS.includes('"p995", "p9999"]'),
+    "APP_JS BAND_KEYS does not bracket the ladder with p0001 / p9999",
+  );
+  assert.ok(APP_JS.includes('{ key: "p0001", label: "0.01%" }'), "CSV ladder missing the 0.01% column");
+  assert.ok(APP_JS.includes('{ key: "p9999", label: "99.99%" }'), "CSV ladder missing the 99.99% column");
+});
+
+test("prefs.bands defaults the envelope pair to off with no migration step", () => {
+  // explicit false defaults on both sides (chart engine + app), so stored prefs
+  // that predate the keys simply fall through to them
+  assert.ok(APP_JS.includes("p0001: false"), "APP_JS defaultBands missing the p0001 default");
+  assert.ok(APP_JS.includes("p9999: false"), "APP_JS defaultBands missing the p9999 default");
+  assert.ok(CHART_JS.includes("p0001: false"), "CHART_JS prefs missing the p0001 default");
+  assert.ok(CHART_JS.includes("p9999: false"), "CHART_JS prefs missing the p9999 default");
+  // no new migration was introduced for them: the only legacy carry-over is still
+  // the v0.1.1 pair map, untouched
+  assert.ok(
+    APP_JS.includes('var LEGACY_KEYS = ["50", "67", "95", "99"];'),
+    "the legacy pair-key list changed — a migration was added for the envelope pair",
   );
 });
 
@@ -429,10 +496,12 @@ function evalAppWithPrefs(seed: string): Record<string, string> {
 }
 
 const NEW_DEFAULT_BANDS: Record<string, boolean> = {
-  p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
-  p75: false, p835: true, p90: false, p975: true, p995: false,
+  p0001: false, p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+  p75: false, p835: true, p90: false, p975: true, p995: false, p9999: false,
 };
-const EXTRA_KEYS = ["p005", "p10", "p25", "p50", "p75", "p90", "p995"];
+// Every non-default percentile, including the v0.1.7 envelope pair: none of them
+// may ever be switched on by the legacy migration.
+const EXTRA_KEYS = ["p0001", "p005", "p10", "p25", "p50", "p75", "p90", "p995", "p9999"];
 
 // The raw JSON persisted under 'bpl.prefs.v1' after a page load, asserting it exists.
 function persistedPrefs(store: Record<string, string>): string {
@@ -493,6 +562,24 @@ test("an already-migrated new-shape prefs load is stable and not rewritten", () 
   assert.equal(second, migrated, "second load re-migrated / rewrote an already-migrated prefs");
 });
 
+// v0.1.7: prefs stored before the 0.01/99.99% keys existed are NOT a legacy shape —
+// they carry per-line p* keys — so nothing migrates and nothing is rewritten; the two
+// absent keys simply fall through to their `false` defaults.
+test("pre-v0.1.7 per-line prefs are left untouched (envelope keys default off)", () => {
+  const eleven = JSON.stringify({
+    bands: {
+      p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+      p75: false, p835: true, p90: false, p975: true, p995: false,
+    },
+  });
+  const store = evalAppWithPrefs(eleven);
+  assert.equal(
+    store["bpl.prefs.v1"],
+    eleven,
+    "an 11-key per-line prefs was rewritten — a migration ran where none is needed",
+  );
+});
+
 // ===========================================================================
 //  YEAR-END TABLE CSV EXPORT (spec 14, v0.1.5) — builder unit tests
 // ===========================================================================
@@ -547,13 +634,13 @@ function evalAppCsvBuilder(): CsvBuilder {
   return (app as { buildYearEndCsv: CsvBuilder }).buildYearEndCsv;
 }
 
-// A full (v0.1.2+) fit carrying all eleven percentile offsets, plus a legacy
+// A full (v0.1.7) fit carrying all thirteen percentile offsets, plus a legacy
 // four-key fit (only the classic 2.5/16.5/83.5/97.5) to prove legacy exports.
 const CSV_MODEL_FULL = {
   a: -16.5, n: 5.7, fittedAt: "2026-07-12T09:30:00.000Z",
   bandOffsets: {
-    p005: -0.9, p025: -0.6, p10: -0.45, p165: -0.3, p25: -0.2, p50: 0.0,
-    p75: 0.2, p835: 0.3, p90: 0.45, p975: 0.6, p995: 0.9,
+    p0001: -1.2, p005: -0.9, p025: -0.6, p10: -0.45, p165: -0.3, p25: -0.2, p50: 0.0,
+    p75: 0.2, p835: 0.3, p90: 0.45, p975: 0.6, p995: 0.9, p9999: 1.2,
   },
 };
 const CSV_MODEL_LEGACY = {
@@ -601,9 +688,12 @@ test("CSV export: price-mode header lists all present percentiles ascending, Tre
   const { header } = csvLines(csv);
   assert.equal(
     header,
-    "Year,Actual close,0.5%,2.5%,10%,16.5%,25%,50%,75%,83.5%,90%,97.5%,99.5%,Trend",
+    "Year,Actual close,0.01%,0.5%,2.5%,10%,16.5%,25%,50%,75%,83.5%,90%,97.5%,99.5%,99.99%,Trend",
     "price-mode header mismatch",
   );
+  // v0.1.7: the envelope pair brackets the percentile block on a 13-key fit
+  assert.ok(header.indexOf(",0.01%,") >= 0, "0.01% column missing from a 13-key export");
+  assert.ok(header.indexOf(",99.99%,Trend") >= 0, "99.99% column missing (or misplaced) on a 13-key export");
 });
 
 test("CSV export: holdings-mode header adds BTC held and suffixes value columns", () => {
@@ -612,8 +702,8 @@ test("CSV export: holdings-mode header adds BTC held and suffixes value columns"
   const { header } = csvLines(csv);
   assert.equal(
     header,
-    "Year,BTC held,Actual value,0.5% value,2.5% value,10% value,16.5% value,25% value," +
-      "50% value,75% value,83.5% value,90% value,97.5% value,99.5% value,Trend value",
+    "Year,BTC held,Actual value,0.01% value,0.5% value,2.5% value,10% value,16.5% value,25% value," +
+      "50% value,75% value,83.5% value,90% value,97.5% value,99.5% value,99.99% value,Trend value",
     "holdings-mode header mismatch",
   );
 });
@@ -657,7 +747,7 @@ test("CSV export: a legacy four-key fit exports only its available percentiles",
   const { header, lines } = csvLines(csv);
   assert.equal(header, "Year,Actual close,2.5%,16.5%,83.5%,97.5%,Trend", "legacy header should hold only the classic four + Trend");
   // and the absent percentiles never appear as columns
-  for (const gone of ["0.5%", "10%", "25%", "50%", "75%", "90%", "99.5%"]) {
+  for (const gone of ["0.01%", "0.5%", "10%", "25%", "50%", "75%", "90%", "99.5%", "99.99%"]) {
     assert.ok(header.indexOf(gone) === -1, "legacy header unexpectedly contains " + gone);
   }
   const cells = rowStarting(lines, "2020,");
@@ -673,12 +763,13 @@ test("CSV export: holdings mode multiplies price columns by the BTC amount", () 
   assert.equal(cells[2], "58000.00", "actual value should be 29000 * 2 held BTC");
 });
 
-// A quantileRegression fit over the same trend: eleven separately-sloped lines,
+// A quantileRegression fit over the same trend: thirteen separately-sloped lines,
 // line j offset from trend by delta*(0.9 - 0.2*log10(t)) with delta running -1..+1
 // across the ladder — i.e. a fan that CONVERGES as t grows, the way porkopolis's
 // quantile regressions do. The offsets are carried too (the documented fallback),
 // so a test can prove the builder prefers the lines.
-const QR_LADDER_KEYS = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
+const QR_LADDER_KEYS = ["p0001", "p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995", "p9999"];
+const QR_MID = (QR_LADDER_KEYS.length - 1) / 2;
 const CSV_MODEL_QR = {
   a: -16.5, n: 5.7, fittedAt: "2026-07-12T09:30:00.000Z",
   bandMode: "quantileRegression",
@@ -686,7 +777,7 @@ const CSV_MODEL_QR = {
   bandLines: ((): Record<string, { a: number; n: number }> => {
     const out: Record<string, { a: number; n: number }> = {};
     QR_LADDER_KEYS.forEach((k, j) => {
-      const delta = (j - 5) / 5;
+      const delta = (j - QR_MID) / QR_MID;
       out[k] = { a: -16.5 + delta * 0.9, n: 5.7 - delta * 0.2 };
     });
     return out;
@@ -698,10 +789,18 @@ const CSV_MODEL_QR_STALE = {
   bandMode: "quantileRegression",
   bandOffsets: CSV_MODEL_FULL.bandOffsets,
 };
+// Column index of a header label, read off the built CSV's own header row (so the
+// helper survives ladder growth — the envelope pair shifted every index in v0.1.7).
+function colIndex(lines: string[], label: string): number {
+  const cells = at(lines, 0).split(",");
+  const i = cells.indexOf(label);
+  assert.ok(i >= 0, "CSV header has no column " + label);
+  return i;
+}
 // 97.5% / Trend for a given year's row (price-mode column layout).
 function upperOverTrend(lines: string[], year: number): number {
   const cells = rowStarting(lines, year + ",");
-  return Number(at(cells, 11)) / Number(at(cells, -1));
+  return Number(at(cells, colIndex(lines, "97.5%"))) / Number(at(cells, -1));
 }
 
 test("CSV export: quantileRegression columns come from the band lines and narrow over time", () => {
@@ -734,7 +833,7 @@ test("CSV export: a quantileRegression record without bandLines falls back to th
   const { lines: parallel } = csvLines(build(CSV_MODEL_FULL, CSV_PRICES, NO_HOLD, 2045));
   assert.equal(
     header,
-    "Year,Actual close,0.5%,2.5%,10%,16.5%,25%,50%,75%,83.5%,90%,97.5%,99.5%,Trend",
+    "Year,Actual close,0.01%,0.5%,2.5%,10%,16.5%,25%,50%,75%,83.5%,90%,97.5%,99.5%,99.99%,Trend",
     "stale quantileRegression record should still export every offset column",
   );
   assert.equal(

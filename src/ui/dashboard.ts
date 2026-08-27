@@ -364,7 +364,7 @@ const PAGE_BODY: string = String.raw`</span>
     </div>
     <div class="chart-explain" id="explainPanel" style="display:none">
       <p>The green line is Bitcoin's actual daily price; the ring at the end is the live price for today, which isn't final until the day closes. The white line is the power-law trend fitted to the entire history - it is refit from scratch at every update, so it can shift slightly as new data arrives.</p>
-      <p>The dotted lines are percentiles of the model's own history: price has historically closed below the 97.5% line on 97.5% of all days, below the 16.5% line on only 16.5% of days, and so on. The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set; open 'More bands' in the legend to add others, including the 50% median. They are descriptions of the past, not statistical guarantees about the future. In quantile-regression mode each dotted line is fitted separately and the funnel narrows over time instead of keeping a constant width.</p>
+      <p>The dotted lines are percentiles of the model's own history: price has historically closed below the 97.5% line on 97.5% of all days, below the 16.5% line on only 16.5% of days, and so on. The default four (2.5/16.5/83.5/97.5) are the classic porkopolis set; open 'More bands' in the legend to add others, including the 50% median. They are descriptions of the past, not statistical guarantees about the future. In quantile-regression mode each dotted line is fitted separately and the funnel narrows over time instead of keeping a constant width. The outermost 0.01% and 99.99% lines are effectively Bitcoin's historical floor and ceiling - touched only on the most extreme days in fifteen years - so they are driven by a handful of events. Treat them as reference rails, not statistical bands.</p>
       <p>Left of the 'today' line is history; right of it is the same formula extended forward. The hatched area past ~2040 is where the model's own authors say it should not be trusted. Halving lines mark Bitcoin's supply-cut events (dashed ones are estimates).</p>
       <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to move around the chart, hold Shift and drag to select a range to zoom into, scroll to zoom at the cursor, and double-click to reset the view.</p>
     </div>
@@ -403,6 +403,7 @@ const PAGE_BODY: string = String.raw`</span>
       <button class="lg-band" type="button" id="lg_p975" data-band="p975" aria-pressed="true" aria-label="Toggle the 97.5% line"><span class="lg-sw" style="background:#f44336"></span>97.5%</button>
       <button class="lg-more" type="button" id="moreBandsToggle" aria-expanded="false" aria-controls="moreBandsRow">More bands <span class="lg-more-chev" id="moreBandsChev">&#9662;</span></button>
       <span class="lg-more-row" id="moreBandsRow" style="display:none">
+        <button class="lg-band" type="button" id="lg_p0001" data-band="p0001" aria-pressed="false" aria-label="Toggle the 0.01% line"><span class="lg-sw" style="background:#e91e63"></span>0.01%</button>
         <button class="lg-band" type="button" id="lg_p005" data-band="p005" aria-pressed="false" aria-label="Toggle the 0.5% line"><span class="lg-sw" style="background:#ab47bc"></span>0.5%</button>
         <button class="lg-band" type="button" id="lg_p10" data-band="p10" aria-pressed="false" aria-label="Toggle the 10% line"><span class="lg-sw" style="background:#ff9800"></span>10%</button>
         <button class="lg-band" type="button" id="lg_p25" data-band="p25" aria-pressed="false" aria-label="Toggle the 25% line"><span class="lg-sw" style="background:#26a69a"></span>25%</button>
@@ -410,6 +411,7 @@ const PAGE_BODY: string = String.raw`</span>
         <button class="lg-band" type="button" id="lg_p75" data-band="p75" aria-pressed="false" aria-label="Toggle the 75% line"><span class="lg-sw" style="background:#26a69a"></span>75%</button>
         <button class="lg-band" type="button" id="lg_p90" data-band="p90" aria-pressed="false" aria-label="Toggle the 90% line"><span class="lg-sw" style="background:#ff9800"></span>90%</button>
         <button class="lg-band" type="button" id="lg_p995" data-band="p995" aria-pressed="false" aria-label="Toggle the 99.5% line"><span class="lg-sw" style="background:#ab47bc"></span>99.5%</button>
+        <button class="lg-band" type="button" id="lg_p9999" data-band="p9999" aria-pressed="false" aria-label="Toggle the 99.99% line"><span class="lg-sw" style="background:#e91e63"></span>99.99%</button>
       </span>
     </div>
     <div id="chartWrap">

@@ -14,8 +14,9 @@
 // What the client computes locally (server sends only params + daily prices):
 //   trend price at day t:  10 ^ (a + n*log10(t))            [t = days since genesis]
 //   band price k:          10 ^ (a + n*log10(t) + offset_k) [offset in log10 space]
-// The trend and every VISIBLE percentile line (up to eleven individually-toggled
-// lines: 0.5/2.5/10/16.5/25/50/75/83.5/90/97.5/99.5%, the 50% median dashed) are
+// The trend and every VISIBLE percentile line (up to thirteen individually-toggled
+// lines: 0.01/0.5/2.5/10/16.5/25/50/75/83.5/90/97.5/99.5/99.99%, the 50% median
+// dashed, the 0.01/99.99% envelope pair added in v0.1.7) are
 // re-sampled at ~2px resolution across the FULL domain (data start -> Dec 31 of
 // projectionEndYear) so the curves stay smooth in any x/y mode and under any zoom.
 //
@@ -23,7 +24,7 @@
 // bandMode=quantileRegression AND carries bandLines, each percentile is its own
 // fitted line (its own slope) rather than a parallel offset, so the band price is
 //   band price k:          10 ^ (a_k + n_k*log10(t))
-// evaluated per x and then MONOTONE-REARRANGED across the ladder (sort the eleven
+// evaluated per x and then MONOTONE-REARRANGED across the ladder (sort the ladder
 // values ascending, hand them back in ascending-tau order) — a faithful replica of
 // the backend's bandPricesAt(). Every consumer here (lines, fills, tooltip rows,
 // tooltip quantile, oscillator guides, autoscale) reads through that one helper, so
@@ -71,12 +72,14 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-  // The eleven individually-toggled percentile lines (v0.1.2). Each reads ONE
-  // offset off model.off by name and is labelled by its percentile. The 50%
-  // median is DASHED gray; every other percentile is dotted. "off" doubles as the
-  // legend/pref key. Lines whose offset key is absent (fits made before that
-  // percentile existed) no-op, so every consumer guards on linePresent().
+  // The thirteen individually-toggled percentile lines (v0.1.2; the 0.01/99.99%
+  // envelope pair added in v0.1.7). Each reads ONE offset off model.off by name and
+  // is labelled by its percentile. The 50% median is DASHED gray; every other
+  // percentile is dotted. "off" doubles as the legend/pref key. Lines whose offset
+  // key is absent (fits made before that percentile existed) no-op, so every
+  // consumer guards on linePresent(). Drawn top-down: 99.99% first, 0.01% last.
   var BAND_LINES = [
+    { off: "p9999", pct: "99.99%", color: "#E91E63", dash: [2, 3], def: false },
     { off: "p995", pct: "99.5%", color: "#AB47BC", dash: [2, 3], def: false },
     { off: "p975", pct: "97.5%", color: "#F44336", dash: [2, 3], def: true },
     { off: "p90",  pct: "90%",   color: "#FF9800", dash: [2, 3], def: false },
@@ -87,20 +90,25 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     { off: "p165", pct: "16.5%", color: "#03A9F4", dash: [2, 3], def: true },
     { off: "p10",  pct: "10%",   color: "#FF9800", dash: [2, 3], def: false },
     { off: "p025", pct: "2.5%",  color: "#F44336", dash: [2, 3], def: true },
-    { off: "p005", pct: "0.5%",  color: "#AB47BC", dash: [2, 3], def: false }
+    { off: "p005", pct: "0.5%",  color: "#AB47BC", dash: [2, 3], def: false },
+    { off: "p0001", pct: "0.01%", color: "#E91E63", dash: [2, 3], def: false }
   ];
 
-  // The ladder's band keys in ASCENDING-tau order (0.5% -> 99.5%) and the matching
+  // The ladder's band keys in ASCENDING-tau order (0.01% -> 99.99%) and the matching
   // percentages. This is the order the monotone rearrangement hands sorted values
   // back in, and the order the quantile interpolation walks (mirrors the backend
   // BAND_KEYS / BAND_TAUS).
-  var QR_LADDER = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
-  var QR_PCTS = [0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5];
+  var QR_LADDER = ["p0001", "p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995", "p9999"];
+  var QR_PCTS = [0.01, 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5, 99.99];
+  // Reachable quantile range: the outermost ladder taus (mirrors the backend's
+  // QUANTILE_MIN / QUANTILE_MAX, widened from 0.5/99.5 by the v0.1.7 envelope pair).
+  var QUANTILE_MIN = 0.01, QUANTILE_MAX = 99.99;
 
   // Symmetric same-colour percentile pairs (outermost first). Band-fill shades
   // the region between a pair's two lines, but ONLY when BOTH lines are visible.
   // The 50% median is a lone line and has no fill. Opacities grade outermost-faintest.
   var FILL_PAIRS = [
+    { lo: "p0001", hi: "p9999", fill: "rgba(233,30,99,0.03)" },
     { lo: "p005", hi: "p995", fill: "rgba(171,71,188,0.035)" },
     { lo: "p025", hi: "p975", fill: "rgba(244,67,54,0.05)" },
     { lo: "p10",  hi: "p90",  fill: "rgba(255,152,0,0.055)" },
@@ -117,7 +125,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   // ---- controller state ---------------------------------------------------
   var els = null;            // { main, mctx, osc, octx, tip, wrap, oscWrap }
-  var model = null;          // { a, n, off:{p005..p995}, lines:{p005..p995}|null, projEnd, caution, bandMode }
+  var model = null;          // { a, n, off:{p0001..p9999}, lines:{p0001..p9999}|null, projEnd, caution, bandMode }
   // Per-frame memo of the rearranged quantile-regression prices, keyed by timestamp.
   // Every line, fill, guide and tooltip asks for the same x grid, so one sort per x
   // per frame is enough. Cleared at the top of every draw().
@@ -128,8 +136,8 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   // prefs.bands maps each BAND_LINES "off" key -> shown boolean. Defaults mirror
   // the per-line "def" flags: the classic four (2.5/16.5/83.5/97.5) on, the rest off.
   var prefs = { xMode: "date", yMode: "log", bandFill: false, halvings: true, oscillator: true, preset: "full",
-                bands: { p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
-                         p75: false, p835: true, p90: false, p975: true, p995: false } };
+                bands: { p0001: false, p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
+                         p75: false, p835: true, p90: false, p975: true, p995: false, p9999: false } };
   var fullMin = Date.UTC(2010, 6, 18), fullMax = Date.UTC(2045, 11, 31);
   var view = { min: fullMin, max: fullMax };   // visible time window (ms)
   var todayMs = utcMidnight(Date.now());
@@ -823,7 +831,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   // Quantile in quantileRegression mode (mirrors the backend quantileFromLines):
   // where the hovered price sits among the rearranged ladder values at this x, tau
   // linearly interpolated in log10 price space between the two bracketing lines and
-  // clamped to the ladder's own outer levels [0.5, 99.5].
+  // clamped to the ladder's own outer levels — [0.01, 99.99] since v0.1.7.
   function quantileFromLinesAt(ms, usd) {
     if (!(usd > 0)) return NaN;
     var prices = qrPricesAt(ms), vals = [], pcts = [], i, v;
@@ -833,15 +841,15 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     }
     if (!vals.length) return NaN;
     var y = log10(usd);
-    if (y <= log10(vals[0])) return clamp(pcts[0], 0.5, 99.5);
+    if (y <= log10(vals[0])) return clamp(pcts[0], QUANTILE_MIN, QUANTILE_MAX);
     for (i = 1; i < vals.length; i++) {
       var loY = log10(vals[i - 1]), hiY = log10(vals[i]);
       if (y <= hiY) {
         var span = hiY - loY, w = span > 0 ? (y - loY) / span : 0;
-        return clamp(pcts[i - 1] + w * (pcts[i] - pcts[i - 1]), 0.5, 99.5);
+        return clamp(pcts[i - 1] + w * (pcts[i] - pcts[i - 1]), QUANTILE_MIN, QUANTILE_MAX);
       }
     }
-    return clamp(pcts[pcts.length - 1], 0.5, 99.5);
+    return clamp(pcts[pcts.length - 1], QUANTILE_MIN, QUANTILE_MAX);
   }
 
   function updateTooltip(ms, pricePt, px) {
@@ -1157,7 +1165,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     scheduleDraw();
   }
 
-  // Quantile-regression band lines (v0.1.6): eleven {a,n} pairs, one per ladder
+  // Quantile-regression band lines (v0.1.6): thirteen {a,n} pairs, one per ladder
   // key. Adopted ONLY when the fit declares bandMode=quantileRegression and carries
   // at least one finite line; a stale record (mode set, lines missing or garbage)
   // returns null so the parallel bandOffsets path renders instead.
@@ -1177,14 +1185,14 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function setModel(m) {
     if (!m) { model = null; scheduleDraw(); return; }
     var off = m.bandOffsets || {};
-    // Carry all eleven offsets; the newer keys may be undefined on old fits and
+    // Carry all thirteen offsets; the newer keys may be undefined on old fits and
     // every drawing path guards on linePresent() before touching them.
     model = {
       a: m.a, n: m.n,
       off: {
-        p005: off.p005, p025: off.p025, p10: off.p10, p165: off.p165,
+        p0001: off.p0001, p005: off.p005, p025: off.p025, p10: off.p10, p165: off.p165,
         p25: off.p25, p50: off.p50, p75: off.p75, p835: off.p835,
-        p90: off.p90, p975: off.p975, p995: off.p995
+        p90: off.p90, p975: off.p975, p995: off.p995, p9999: off.p9999
       },
       lines: readBandLines(m),
       bandMode: m.bandMode,

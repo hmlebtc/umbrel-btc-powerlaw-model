@@ -100,12 +100,13 @@ function makeRecordingCtx(): RecordingCtx {
   };
 }
 
-// The v0.1.2 percentile-line colours (six distinct hues; symmetric percentiles
-// share a hue, and the 50% median is gray). On the main canvas these appear as
+// The percentile-line colours (seven distinct hues since v0.1.7 added the magenta
+// 0.01/99.99% envelope pair; symmetric percentiles share a hue, and the 50% median
+// is gray). On the main canvas these appear as
 // strokeStyle ONLY inside drawBands (verified against chart.ts: every other
 // stroke uses a non-band colour), so counting stroke() calls made while a band
 // colour is live counts exactly the visible percentile polylines.
-const BAND_COLORS = ["#AB47BC", "#F44336", "#FF9800", "#03A9F4", "#26A69A", "#9E9E9E"];
+const BAND_COLORS = ["#E91E63", "#AB47BC", "#F44336", "#FF9800", "#03A9F4", "#26A69A", "#9E9E9E"];
 function countBandPolylines(ctx: RecordingCtx): number {
   let cur: string | null = null;
   let n = 0;
@@ -368,13 +369,14 @@ test("default prefs draw exactly the four default percentile lines", () => {
   assert.equal(bands, 4, "expected 4 default band polylines, got " + bands);
 });
 
-// (7b) v0.1.2: with the full 11-key model and EVERY line toggled on, eleven
-//      individual polylines are drawn — including the DASHED 50% median (gray,
-//      setLineDash [6,4], the sole non-dotted percentile).
-test("11-key offsets with all lines on draw eleven polylines incl. the dashed median", () => {
+// (7b) v0.1.2 / v0.1.7: with the full 13-key model and EVERY line toggled on,
+//      thirteen individual polylines are drawn — including the DASHED 50% median
+//      (gray, setLineDash [6,4], the sole non-dotted percentile) and the magenta
+//      0.01/99.99% envelope pair.
+test("13-key offsets with all lines on draw thirteen polylines incl. the dashed median", () => {
   const offs = BAND_OFFSETS as unknown as Record<string, number>;
-  const ALL_KEYS = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"];
-  // sanity: the fixture-derived offsets really do carry all eleven keys
+  const ALL_KEYS = ["p0001", "p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995", "p9999"];
+  // sanity: the fixture-derived offsets really do carry all thirteen keys
   for (const k of ALL_KEYS) {
     assert.ok(typeof offs[k] === "number", "fixture bandOffsets missing key " + k);
   }
@@ -383,13 +385,14 @@ test("11-key offsets with all lines on draw eleven polylines incl. the dashed me
   const h = runPaint({ bands: allOn });
 
   const bands = countBandPolylines(h.mainCtx);
-  assert.equal(bands, 11, "expected 11 percentile polylines with every line on, got " + bands);
+  assert.equal(bands, 13, "expected 13 percentile polylines with every line on, got " + bands);
 
   const strokeColors = new Set(
     h.mainCtx.sets.filter((s) => s.prop === "strokeStyle").map((s) => String(s.value)),
   );
   assert.ok(strokeColors.has("#9E9E9E"), "50% median gray #9E9E9E never stroked");
   assert.ok(strokeColors.has("#FF9800"), "10%/90% amber #FF9800 never stroked");
+  assert.ok(strokeColors.has("#E91E63"), "0.01%/99.99% magenta #E91E63 never stroked");
   // the median is the only DASHED percentile: a setLineDash([6,4]) must be present
   const dashedMedian = h.mainCtx.calls.some(
     (c) => c.m === "setLineDash" && JSON.stringify(c.args[0]) === "[6,4]",
@@ -426,28 +429,30 @@ test("4-key (legacy) offsets draw exactly four band lines and never throw", () =
   );
   assert.ok(!strokeColors.has("#26A69A"), "25%/75% teal drew despite missing p25/p75 keys");
   assert.ok(!strokeColors.has("#9E9E9E"), "median gray drew despite missing p50 key");
+  assert.ok(!strokeColors.has("#E91E63"), "envelope magenta drew despite missing p0001/p9999 keys");
 });
 
 // ===========================================================================
 //  QUANTILE-REGRESSION BAND LINES (spec 15.3, v0.1.6)
 // ===========================================================================
-// In this mode the server sends eleven separately-fitted {a,n} lines instead of
-// eleven parallel offsets, and the chart must evaluate each one per x (with the
+// In this mode the server sends thirteen separately-fitted {a,n} lines instead of
+// thirteen parallel offsets, and the chart must evaluate each one per x (with the
 // monotone rearrangement) rather than sliding the trend up and down by a constant.
 // The observable difference is geometric: parallel offsets keep a CONSTANT vertical
 // pixel gap between two lines on a log y-axis, separately-sloped lines do not.
 
-const QR_LADDER = ["p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995"] as const;
+const QR_LADDER = ["p0001", "p005", "p025", "p10", "p165", "p25", "p50", "p75", "p835", "p90", "p975", "p995", "p9999"] as const;
+const MID = (QR_LADDER.length - 1) / 2;   // ladder index of the 50% median
 
 // A synthetic, deliberately NON-parallel ladder around the real fixture fit: line j
 // sits at trend + delta*(0.9 - 0.2*log10(t)) in log10 space, delta running -1..+1
 // across the ladder. The spread shrinks as t grows — a converging fan like the one
 // porkopolis's quantile regressions produce — and stays strictly ordered over the
-// whole 2010..2045 domain, so the eleven lines are eleven distinct polylines.
+// whole 2010..2045 domain, so the thirteen lines are thirteen distinct polylines.
 function syntheticBandLines(): Record<string, { a: number; n: number }> {
   const out: Record<string, { a: number; n: number }> = {};
   for (let j = 0; j < QR_LADDER.length; j++) {
-    const delta = (j - 5) / 5;
+    const delta = (j - MID) / MID;
     out[QR_LADDER[j] as string] = { a: FIT.a + delta * 0.9, n: FIT.n - delta * 0.2 };
   }
   return out;
@@ -467,7 +472,7 @@ const ALL_BANDS_ON: Record<string, boolean> = (() => {
 })();
 
 // Every polyline stroked while a band colour was live, in draw order — which is the
-// engine's BAND_LINES order, 99.5% first down to 0.5% last. Points are the (x,y) CSS
+// engine's BAND_LINES order, 99.99% first down to 0.01% last. Points are the (x,y) CSS
 // px pairs the engine actually emitted, so a test can measure the vertical distance
 // between two lines at any sample index.
 function bandPolylines(ctx: RecordingCtx): Array<Array<[number, number]>> {
@@ -499,17 +504,17 @@ function yAt(line: Array<[number, number]>, k: number): number {
   return p[1];
 }
 
-// (9) The whole point of the mode: eleven lines that are NOT parallel ------------
-test("quantileRegression bandLines draw eleven percentile lines whose gaps change across x", () => {
+// (9) The whole point of the mode: thirteen lines that are NOT parallel -----------
+test("quantileRegression bandLines draw thirteen percentile lines whose gaps change across x", () => {
   const h = runPaint({ bands: ALL_BANDS_ON }, QR_MODEL_PAYLOAD);
 
   const bands = countBandPolylines(h.mainCtx);
-  assert.equal(bands, 11, "expected 11 percentile polylines from bandLines, got " + bands);
+  assert.equal(bands, 13, "expected 13 percentile polylines from bandLines, got " + bands);
 
   const lines = bandPolylines(h.mainCtx);
-  assert.equal(lines.length, 11, "expected 11 recorded band polylines, got " + lines.length);
-  const top = polyAt(lines, 0);   // 99.5% — drawn first
-  const bottom = polyAt(lines, 10); // 0.5% — drawn last
+  assert.equal(lines.length, 13, "expected 13 recorded band polylines, got " + lines.length);
+  const top = polyAt(lines, 0);   // 99.99% — drawn first
+  const bottom = polyAt(lines, lines.length - 1); // 0.01% — drawn last
   assert.equal(top.length, bottom.length, "the two lines were not sampled on the same x grid");
   assert.ok(top.length > 100, "too few samples to measure a gap: " + top.length);
 
@@ -538,9 +543,9 @@ test("quantileRegression bandLines draw eleven percentile lines whose gaps chang
 test("an offsets-only model still draws parallel percentile lines", () => {
   const h = runPaint({ bands: ALL_BANDS_ON });   // fullSample offsets fixture model
   const lines = bandPolylines(h.mainCtx);
-  assert.equal(lines.length, 11, "expected 11 recorded band polylines, got " + lines.length);
+  assert.equal(lines.length, 13, "expected 13 recorded band polylines, got " + lines.length);
   const top = polyAt(lines, 0);
-  const bottom = polyAt(lines, 10);
+  const bottom = polyAt(lines, lines.length - 1);
   assert.equal(top.length, bottom.length, "the two lines were not sampled on the same x grid");
 
   // On a log y-axis a constant log10 offset difference is a constant pixel gap.

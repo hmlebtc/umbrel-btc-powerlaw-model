@@ -199,6 +199,7 @@ export function fitOLS(sample: readonly DailyObservation[]): OlsFit {
 // ---------------------------------------------------------------------------
 
 const BAND_PCTS = {
+  p0001: 0.01,
   p005: 0.5,
   p025: 2.5,
   p10: 10,
@@ -210,10 +211,12 @@ const BAND_PCTS = {
   p90: 90,
   p975: 97.5,
   p995: 99.5,
+  p9999: 99.99,
 } as const;
 
 function offsetsFromResiduals(residuals: readonly number[]): BandOffsets {
   return {
+    p0001: percentile(residuals, BAND_PCTS.p0001),
     p005: percentile(residuals, BAND_PCTS.p005),
     p025: percentile(residuals, BAND_PCTS.p025),
     p10: percentile(residuals, BAND_PCTS.p10),
@@ -225,6 +228,7 @@ function offsetsFromResiduals(residuals: readonly number[]): BandOffsets {
     p90: percentile(residuals, BAND_PCTS.p90),
     p975: percentile(residuals, BAND_PCTS.p975),
     p995: percentile(residuals, BAND_PCTS.p995),
+    p9999: percentile(residuals, BAND_PCTS.p9999),
   };
 }
 
@@ -315,7 +319,7 @@ export function computeBandOffsets(
 // Quantile regression bands (spec section 15.1)
 // ---------------------------------------------------------------------------
 
-/** A band key of the eleven-line ladder (shared by offsets and lines). */
+/** A band key of the thirteen-line ladder (shared by offsets and lines). */
 export type BandKey = keyof BandOffsets;
 
 /**
@@ -324,6 +328,7 @@ export type BandKey = keyof BandOffsets;
  * fraction (0.975), the matching BAND_PCTS entry the percentage (97.5).
  */
 export const BAND_TAUS: Readonly<Record<BandKey, number>> = {
+  p0001: 0.0001,
   p005: 0.005,
   p025: 0.025,
   p10: 0.1,
@@ -335,6 +340,7 @@ export const BAND_TAUS: Readonly<Record<BandKey, number>> = {
   p90: 0.9,
   p975: 0.975,
   p995: 0.995,
+  p9999: 0.9999,
 };
 
 /** Band keys in ascending-tau order (BAND_TAUS is declared in that order). */
@@ -347,9 +353,13 @@ export const QR_MAX_ITERATIONS = 200;
 /** Floor on |residual| in the IRLS weight, so a point on the line can't divide by 0. */
 const QR_MIN_ABS_RESIDUAL = 1e-6;
 
-/** The quantile readout is clamped to the ladder's own outer levels. */
-const QUANTILE_MIN = 0.5;
-const QUANTILE_MAX = 99.5;
+/**
+ * The quantile readout is clamped to the ladder's own outer levels — widened to
+ * the v0.1.7 envelope pair (spec 16.1). Semantics are unchanged; the reachable
+ * range simply follows the outermost taus.
+ */
+const QUANTILE_MIN = 0.01;
+const QUANTILE_MAX = 99.99;
 
 export interface QuantileLineFit extends BandLine {
   /** IRLS iterations actually run (1..QR_MAX_ITERATIONS). */
@@ -403,11 +413,19 @@ export function fitQuantileLine(
 }
 
 /**
- * The eleven ladder taus fitted as separate quantile regressions on the SAME
+ * The thirteen ladder taus fitted as separate quantile regressions on the SAME
  * prepared log-log columns fitOLS uses (spec 15.1). Each line gets its own slope,
  * which is the whole point of the mode: porkopolis's latest methodology draws
  * separately-sloped percentile lines that converge toward trend rather than
  * parallel offsets from it.
+ *
+ * The outermost pair (tau 0.0001 / 0.9999, spec 16.1) sits below the sample's own
+ * 1/N resolution at ~5,800 daily points, so those two lines are effectively the
+ * historical floor and ceiling envelopes (porkopolis's Q0/Q100) rather than
+ * meaningful coverage levels. They need no special casing — the ladder arrays
+ * drive the loop — but their IRLS runs may legitimately hit the iteration cap
+ * without the convergence flag, which is why the tests assert the envelope
+ * property rather than a coverage share.
  */
 export function fitBandLines(sample: readonly DailyObservation[]): BandLines {
   const { xs, ys } = prepare(sample);
@@ -424,7 +442,7 @@ function isFiniteLine(line: BandLine | undefined): line is BandLine {
 }
 
 /**
- * The eleven band prices at day t, MONOTONE-REARRANGED
+ * The thirteen band prices at day t, MONOTONE-REARRANGED
  * (Chernozhukov-Fernandez-Val-Galichon): evaluate every line, sort the values
  * ascending, and hand them back to the ladder keys in ascending-tau order. Fitted
  * quantile lines have independent slopes and may therefore cross far outside the
@@ -454,7 +472,7 @@ export function bandPricesAt(bandLines: BandLines, tDays: number): Record<BandKe
  * two bracketing lines and scaled to a percentage. The interpolation runs in
  * log10 price space — the space the whole engine (and the residual-based quantile
  * of the other two modes) works in. Clamped to the ladder's own outer levels
- * [0.5, 99.5]; NaN for a non-positive price or t < 1.
+ * [0.01, 99.99] since v0.1.7; NaN for a non-positive price or t < 1.
  */
 export function quantileFromLines(
   bandLines: BandLines,
@@ -492,7 +510,7 @@ export function quantileFromLines(
 
 /**
  * Fit the sample and attach band offsets for `mode`. In `quantileRegression`
- * mode the eleven separately-sloped ladder lines are attached as well, and
+ * mode the thirteen separately-sloped ladder lines are attached as well, and
  * `bandOffsets` is STILL filled with the full-sample offsets: a documented
  * fallback so a stale client (or any consumer reading an old record shape) keeps
  * drawing parallel bands instead of nothing. sigma / r2 / falsifiability stay

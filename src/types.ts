@@ -63,15 +63,18 @@ export interface SourceStatus extends SourceHealth {
 export type BandMode = 'pointInTime' | 'fullSample' | 'quantileRegression';
 
 /**
- * Residual-percentile offsets (log10 space) added to the trend line. Eleven
+ * Residual-percentile offsets (log10 space) added to the trend line. Thirteen
  * percentiles, drawn as individual labelled lines since v0.1.2:
- * 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5. p025/p165/p835/p975
- * keep their original meaning; p005/p25/p75/p995 were added in v0.1.1; p10/p50/p90
- * are a pure v0.1.2 addition. Records persisted before v0.1.2 carry only the eight
- * v0.1.1 keys (and pre-v0.1.1 records only the original four) — consumers must
+ * 0.01, 0.5, 2.5, 10, 16.5, 25, 50, 75, 83.5, 90, 97.5, 99.5, 99.99.
+ * p025/p165/p835/p975 keep their original meaning; p005/p25/p75/p995 were added in
+ * v0.1.1; p10/p50/p90 are a pure v0.1.2 addition; p0001/p9999 — the extreme
+ * envelope pair, effectively the historical floor/ceiling — a pure v0.1.7 addition.
+ * Records persisted before v0.1.7 carry only the eleven v0.1.2 keys (before v0.1.2
+ * only the eight v0.1.1 keys, before v0.1.1 only the original four) — consumers must
  * guard on presence and treat absent keys as "not available until the next refit".
  */
 export interface BandOffsets {
+  p0001: number;
   p005: number;
   p025: number;
   p10: number;
@@ -83,6 +86,7 @@ export interface BandOffsets {
   p90: number;
   p975: number;
   p995: number;
+  p9999: number;
 }
 
 /**
@@ -100,13 +104,15 @@ export interface BandLine {
 }
 
 /**
- * The eleven quantile-regression lines of the band ladder (spec section 15.1),
- * keyed exactly like BandOffsets and declared in ascending-percentile order —
- * the order model.ts's monotone rearrangement assigns sorted values back in.
- * Present only on fits taken with bandMode `quantileRegression`; records written
- * before v0.1.6 (or in the other two modes) simply have no `bandLines`.
+ * The thirteen quantile-regression lines of the band ladder (spec sections 15.1
+ * and 16.1), keyed exactly like BandOffsets and declared in ascending-percentile
+ * order — the order model.ts's monotone rearrangement assigns sorted values back
+ * in. Present only on fits taken with bandMode `quantileRegression`; records
+ * written before v0.1.6 (or in the other two modes) simply have no `bandLines`,
+ * and v0.1.6 records carry the eleven-line ladder without p0001/p9999.
  */
 export interface BandLines {
+  p0001: BandLine;
   p005: BandLine;
   p025: BandLine;
   p10: BandLine;
@@ -118,6 +124,7 @@ export interface BandLines {
   p90: BandLine;
   p975: BandLine;
   p995: BandLine;
+  p9999: BandLine;
 }
 
 /** Falsifiability guards recomputed each fit (spec section 4). */

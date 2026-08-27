@@ -183,10 +183,12 @@ test('GET /api/status + /api/model: populated after a refit', async () => {
       assert.ok('bandOffsets' in model.body.data);
       assert.ok('falsifiability' in model.body.data);
       assert.equal(model.body.data.milestones.crossings.length, 3);
-      // A fresh v0.1.2 fit serves all eleven band keys, non-decreasing in p-order.
+      // A fresh v0.1.7 fit serves all thirteen band keys (the v0.1.2 eleven plus
+      // the 0.01%/99.99% envelope pair), non-decreasing in p-order.
       const bo = model.body.data.bandOffsets;
       const inPOrder = [
-        bo.p005, bo.p025, bo.p10, bo.p165, bo.p25, bo.p50, bo.p75, bo.p835, bo.p90, bo.p975, bo.p995,
+        bo.p0001, bo.p005, bo.p025, bo.p10, bo.p165, bo.p25, bo.p50, bo.p75, bo.p835, bo.p90,
+        bo.p975, bo.p995, bo.p9999,
       ];
       for (const v of inPOrder) assert.equal(typeof v, 'number');
       for (let i = 1; i < inPOrder.length; i++) assert.ok(inPOrder[i] >= inPOrder[i - 1]);
@@ -268,8 +270,8 @@ test('GET /api/model: serves a pre-v0.1.1 4-key bandOffsets record as-is (backwa
       assert.equal(body.ok, true);
       assert.deepEqual(body.data.bandOffsets, legacyOffsets);
       // Missing new keys are simply absent (those lines aren't drawn until a
-      // refit) — both the v0.1.1 and the v0.1.2 additions.
-      for (const k of ['p005', 'p10', 'p25', 'p50', 'p75', 'p90', 'p995']) {
+      // refit) — the v0.1.1, v0.1.2 and v0.1.7 additions alike.
+      for (const k of ['p0001', 'p005', 'p10', 'p25', 'p50', 'p75', 'p90', 'p995', 'p9999']) {
         assert.ok(!(k in body.data.bandOffsets), `unexpected ${k} served for a legacy record`);
       }
     });
@@ -346,8 +348,9 @@ test('GET /api/model: serves a pre-v0.1.2 8-key bandOffsets record as-is (backwa
       assert.equal(status, 200);
       assert.equal(body.ok, true);
       assert.deepEqual(body.data.bandOffsets, legacyOffsets);
-      // The three v0.1.2 additions are absent until the next refit.
-      for (const k of ['p10', 'p50', 'p90']) {
+      // The three v0.1.2 additions and the v0.1.7 envelope pair are absent until
+      // the next refit.
+      for (const k of ['p10', 'p50', 'p90', 'p0001', 'p9999']) {
         assert.ok(!(k in body.data.bandOffsets), `unexpected ${k} served for a v0.1.1 record`);
       }
     });
@@ -361,9 +364,11 @@ test('GET /api/model: serves a pre-v0.1.2 8-key bandOffsets record as-is (backwa
 // drives the quantile readout; records without one keep the old paths.
 // ---------------------------------------------------------------------------
 
-const LADDER_KEYS = ['p005', 'p025', 'p10', 'p165', 'p25', 'p50', 'p75', 'p835', 'p90', 'p975', 'p995'];
+const LADDER_KEYS = [
+  'p0001', 'p005', 'p025', 'p10', 'p165', 'p25', 'p50', 'p75', 'p835', 'p90', 'p975', 'p995', 'p9999',
+];
 
-test('bandMode=quantileRegression: /api/model carries the 11-line ladder, quantile stays sane', async () => {
+test('bandMode=quantileRegression: /api/model carries the 13-line ladder, quantile stays sane', async () => {
   const { ctx, cleanup } = buildCtx();
   try {
     await withServer(ctx, async (baseUrl) => {
@@ -377,7 +382,7 @@ test('bandMode=quantileRegression: /api/model carries the 11-line ladder, quanti
       assert.equal(status, 200);
       assert.equal(body.data.bandMode, 'quantileRegression');
 
-      // Eleven separately-sloped lines, keyed like bandOffsets.
+      // Thirteen separately-sloped lines, keyed like bandOffsets.
       const lines = body.data.bandLines;
       assert.ok(lines, 'quantileRegression model must serve bandLines');
       assert.deepEqual(Object.keys(lines), LADDER_KEYS);
@@ -392,11 +397,12 @@ test('bandMode=quantileRegression: /api/model carries the 11-line ladder, quanti
       // The documented fallback survives: offsets are still served in full.
       for (const key of LADDER_KEYS) assert.equal(typeof body.data.bandOffsets[key], 'number');
 
-      // currentQuantile now comes from the ladder — clamped to [0.5, 99.5].
+      // currentQuantile now comes from the ladder — clamped to the ladder's own
+      // outer levels, widened to [0.01, 99.99] by the v0.1.7 envelope pair.
       const status2 = await getJSON(baseUrl, '/api/status');
       const q = status2.body.data.currentQuantile;
       assert.equal(typeof q, 'number');
-      assert.ok(q >= 0.5 && q <= 99.5, `currentQuantile=${q}`);
+      assert.ok(q >= 0.01 && q <= 99.99, `currentQuantile=${q}`);
     });
   } finally {
     cleanup();

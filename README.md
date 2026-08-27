@@ -31,12 +31,25 @@ Letting the epoch be a setting would silently invalidate every fit history entry
 something for Bitcoin (the chain's own start) is the only anchor that doesn't need a disclaimer of its
 own.
 
-Bands are drawn as eleven individually toggleable percentile **lines** rather than fixed pairs, colored
+Bands are drawn as thirteen individually toggleable percentile **lines** rather than fixed pairs, colored
 cool-to-hot as they move away from the median. Four are on by default - 2.5% and 97.5% (red `#F44336`) and
-16.5% and 83.5% (blue `#03A9F4`) - and a "More bands" legend expander reveals seven more, all off by
-default: 0.5% and 99.5% (purple `#AB47BC`, the near-never-breached envelope), 10% and 90% (orange
-`#FF9800`), 25% and 75% (teal `#26A69A`), and the 50% median (grey `#9E9E9E`, dashed). Clicking any legend
-chip shows or hides that single line - on the chart, in the tooltip, and in the oscillator's guide lines.
+16.5% and 83.5% (blue `#03A9F4`) - and a "More bands" legend expander reveals nine more, all off by
+default: 0.01% and 99.99% (magenta `#E91E63`, the outermost envelope - see below), 0.5% and 99.5% (purple
+`#AB47BC`, the near-never-breached band), 10% and 90% (orange `#FF9800`), 25% and 75% (teal `#26A69A`), and
+the 50% median (grey `#9E9E9E`, dashed). Clicking any legend chip shows or hides that single line - on the
+chart, in the tooltip, and in the oscillator's guide lines.
+
+The two outermost lines, 0.01% and 99.99%, are a special case worth calling out on their own: with roughly
+5,800 daily points behind the fit, a percentile that fine is below the data's own resolution - one point in
+~5,800 is about 0.017%, coarser than 0.01%. In practice that means these two lines land at, or a hair
+inside, the single lowest and single highest price ever recorded in the series - the same role porkopolis's
+own **Q0 (minimum)** and **Q100 (maximum)** lines play on their chart, just built the same non-degenerate
+way as every other percentile here (an interpolated order statistic in the two parallel-band modes, a
+regressed-then-rearranged line in quantile-regression mode) rather than a literal min/max lookup. Because
+each is effectively anchored by a small handful of the most extreme single days across fifteen-plus years -
+one crash, one blow-off top - they're far more sensitive to individual events than any other line on the
+chart. Treat them as reference rails marking the historical floor and ceiling, not as statistically
+meaningful bands, which is why they ship off by default.
 
 Three ways of computing those percentiles are supported. `fullSample` and `pointInTime` both draw the same
 kind of line - "price has historically closed below this line X% of the time" - and only differ in how
@@ -58,11 +71,11 @@ history is scored; `quantileRegression` is different in kind (see below):
   every Bitcoin cycle so far has swung less far from trend, relative to trend, than the one before it, the
   extreme lines' slopes come out shallower than the trend's own - so instead of running parallel to the
   trend forever, the whole band **funnel narrows** as time passes: porkopolis's own published lines go from
-  roughly 10x/43x the trend early on to roughly 1.1x/2.2x by today. Because eleven independently-fitted
+  roughly 10x/43x the trend early on to roughly 1.1x/2.2x by today. Because thirteen independently-fitted
   lines can mathematically cross each other at some `t` even when none of them cross *near* the data, every
   consumer of this mode - chart, tooltip, oscillator guides, year-end table, CSV export - evaluates the
-  eleven fitted lines at each point in time and then applies **monotone rearrangement**
-  (Chernozhukov-Fernández-Val-Galichon): sort the eleven values and reassign them to the percentile ladder
+  thirteen fitted lines at each point in time and then applies **monotone rearrangement**
+  (Chernozhukov-Fernández-Val-Galichon): sort the thirteen values and reassign them to the percentile ladder
   in ascending order. That guarantees the displayed lines never cross, at any `t`, past, present, or out to
   the projection horizon.
 
@@ -115,7 +128,7 @@ tinting is identical between the two views. Future years are never tinted.
 An **Export CSV** button in the table header downloads the whole table as an Excel-ready CSV, generated
 entirely in your browser (no server round-trip): UTF-8 with a byte-order mark and CRLF line endings, named
 `btc-powerlaw-year-end_<fit date>.csv`. The export is a *superset* of the on-screen columns - it includes
-**every** percentile line present in the current fit (0.5% through 99.5%), not just the default four, with
+**every** percentile line present in the current fit (0.01% through 99.99%), not just the default four, with
 `Trend` as the last column. Values are raw numbers with no currency symbols or thousand separators (prices to
 two decimals, BTC amounts to up to eight), so they drop straight into a spreadsheet; in **My holdings** mode
 it exports your per-year BTC amounts and their values instead of prices.
@@ -162,7 +175,7 @@ dashboard, which shows a live progress bar (fetch history → fetch spot → rec
 percentage, and an ETA countdown derived from the last five run durations. Only one refit can run at a
 time - a second request while one is in flight gets a `409` and the dashboard shows "already running"
 instead of queueing a pile-up. Changing **Band mode** in the settings drawer also triggers a refit
-automatically, since the band lines it draws (offsets, or the eleven quantile-regression lines) only exist
+automatically, since the band lines it draws (offsets, or the thirteen quantile-regression lines) only exist
 once the model has been fit in that mode - no need to remember to press Update Model afterward.
 
 Every refit re-derives the model from the full stored history **plus a provisional point for today, built

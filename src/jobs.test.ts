@@ -115,9 +115,12 @@ test('JobRunner: a quantileRegression refit persists the ladder to model.json (s
     // It survives the JSON round-trip to disk (a fresh store reads it back).
     const reloaded = new ModelStore(dir).current()!;
     assert.deepEqual(reloaded.bandLines, rec.bandLines);
-    assert.equal(Object.keys(reloaded.bandLines!).length, 11);
+    // Thirteen rungs since v0.1.7 (the 0.01%/99.99% envelope pair, spec 16.1).
+    assert.equal(Object.keys(reloaded.bandLines!).length, 13);
+    assert.ok('p0001' in reloaded.bandLines! && 'p9999' in reloaded.bandLines!);
     // Fallback offsets are persisted alongside it, unchanged in shape.
-    assert.equal(Object.keys(reloaded.bandOffsets).length, 11);
+    assert.equal(Object.keys(reloaded.bandOffsets).length, 13);
+    assert.ok('p0001' in reloaded.bandOffsets && 'p9999' in reloaded.bandOffsets);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
