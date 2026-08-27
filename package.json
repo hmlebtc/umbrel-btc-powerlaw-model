@@ -1,6 +1,6 @@
 {
   "name": "umbrel-btc-powerlaw-model",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "description": "Umbrel app that maintains a continuously refit Bitcoin power-law model (price = A*t^n) from live multi-source data, with a dashboard mirroring porkopolis.io/thechart projected to 2045.",

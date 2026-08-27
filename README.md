@@ -97,10 +97,15 @@ double-click resets to the default view; a single-finger drag on touch devices p
 a pan, so double-clicking still works reliably and panning never eats an accidental small movement.
 
 Alongside the chart, a collapsible **year-end model table** lists every calendar year from 2010 through the
-configured projection end year: the actual stored closing price where one exists (the current year is
-marked as still in progress), next to the current fit's trend and default four percentile lines at that
-year's December 31st - computed client-side from the same `(a, n, bandOffsets)` the chart uses, so the
-whole table shifts in step with every refit. Years past ~2040 are muted in the table for the same
+configured projection end year. Its columns are fixed - **Year | Actual close | 0.01% | 2.5% | 16.5% | Trend
+| 83.5% | 97.5%** - regardless of which lines the chart legend currently shows: the actual stored closing
+price where one exists (the current year is marked as still in progress), next to the current fit's floor
+rail, its default percentile lines and its trend at that year's December 31st. All of it is computed
+client-side from the same `(a, n, bandOffsets)` - or, in `quantileRegression` mode, the same rearranged band
+lines - that the chart uses, so the whole table shifts in step with every refit. The leading **0.01%** column
+is the model's floor rail: the level only a couple of days in Bitcoin's whole history have ever closed below.
+A model fitted before that line existed (any record written by a version earlier than 0.1.7) simply shows a
+dash in that column until the next refit. Years past ~2040 are muted in the table for the same
 validity-horizon reason the chart hatches them. The main chart itself is bigger by default (a
 viewport-responsive height and a wider page container on large screens) to give the fuller band fan room to
 breathe.

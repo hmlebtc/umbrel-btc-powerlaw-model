@@ -767,20 +767,31 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
 
   // One model cell: price*scale, always untinted (v0.1.4 — only the Actual close /
   // Actual value cell is tinted now, by actualTintClass; the model/band columns are
-  // plain text). key === null is the Trend; a column this fit cannot evaluate
-  // (percentile absent from a pre-0.1.2 record) renders an em-dash.
+  // plain text). key === null is the Trend; a percentile column this fit cannot
+  // evaluate (absent from a pre-0.1.2 record, or the v0.1.8 floor rail on a
+  // pre-0.1.7 one) renders an em-dash carrying the same "available after the next
+  // model update" title the disabled legend chips use.
+  var COLUMN_UNAVAILABLE = "available after the next model update";
   function valCell(m, ms, key, scale) {
     var price = bandUsdAt(m, ms, key);
-    if (price == null || !isFinite(price)) return "<td>—</td>";
+    if (price == null || !isFinite(price)) {
+      return key == null ? "<td>—</td>" : '<td title="' + COLUMN_UNAVAILABLE + '">—</td>';
+    }
     return "<td>" + esc(fmtUSD(price * scale)) + "</td>";
   }
+  // The six fixed model columns, in display order (v0.1.8, spec 17): the 0.01%
+  // floor rail leads the band block, then 2.5% | 16.5% | Trend | 83.5% | 97.5%.
+  // Same order in both display modes — only the leading Year/BTC/Actual columns
+  // differ. Every cell goes through bandUsdAt(), so the rail follows the active
+  // band mode (rearranged band lines in quantileRegression) like its neighbours.
+  var YT_COLUMNS = ["p0001", "p025", "p165", null, "p835", "p975"];
   function modelCells(m, dec31, scale) {
-    if (!(m && m.a != null && m.n != null)) return "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
-    return valCell(m, dec31, "p025", scale) +
-      valCell(m, dec31, "p165", scale) +
-      valCell(m, dec31, null, scale) +
-      valCell(m, dec31, "p835", scale) +
-      valCell(m, dec31, "p975", scale);
+    var out = "", i;
+    for (i = 0; i < YT_COLUMNS.length; i++) {
+      if (!(m && m.a != null && m.n != null)) { out += "<td>—</td>"; continue; }
+      out += valCell(m, dec31, YT_COLUMNS[i], scale);
+    }
+    return out;
   }
   // Tint class for the Actual close / Actual value cell (v0.1.4, spec 13.3 REVISED).
   // Green (yt-hi) when the year's actual close sat AT OR ABOVE the trend, red (yt-lo)
@@ -1387,7 +1398,8 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
       "December 31st values for every year: past years show the actual closing price; every year shows what the current fit puts the trend and the default percentile lines at on that date. All model values are recomputed from live data at every refit, so this whole table shifts slightly as the fit updates. Years past ~2040 are shown faded - the model's own authors say not to lean on it out there.",
       "My holdings mode: enter how much BTC you expect to hold at the end of each year - one amount for every year, or per-year amounts if you plan to keep accumulating. The table then multiplies your holdings by each line's price for that year; past years use the actual closing price. The amounts are stored only on your Umbrel, behind its login. This is a what-if illustration, not financial advice.",
       "For years with an actual close, the actual value is tinted green when the year finished at or above the trend line, red when it finished below - the same above-or-below-trend read as the Deviation tile, year by year. For the year still in progress the comparison uses the trend at the date of the latest close, not December 31st. It is not a judgment of good or bad.",
-      "Export CSV downloads this table with full-precision numbers and every percentile line in the current fit - not just the columns shown - ready for Excel or any spreadsheet. In My holdings mode it exports your holdings and their values instead of prices."
+      "Export CSV downloads this table with full-precision numbers and every percentile line in the current fit - not just the columns shown - ready for Excel or any spreadsheet. In My holdings mode it exports your holdings and their values instead of prices.",
+      "The 0.01% column is the model's floor rail - the line only two days in fifteen years have ever closed below."
     ],
     sourceMode: "Auto uses every working source with built-in cross-checks and quorum rules - recommended. Manual lets you choose sources yourself; you must keep a valid history source (blockchain.info, or Bitstamp + Binance together) and at least two spot sources.",
     enabledSources: [
@@ -1517,9 +1529,11 @@ export const APP_JS: string = String.raw`/* PLAPP_MAIN */
     setInterval(tick, 1000);
   }
 
-  // Expose the pure year-end CSV builder (spec 14) so the Export CSV click flow
-  // and the smoke-test harness can reach it. Nothing else on the app is global.
-  window.PLApp = { buildYearEndCsv: buildYearEndCsv };
+  // Expose the pure year-end CSV builder (spec 14) and the pure year-end model-cell
+  // renderer (spec 17) so the Export CSV click flow and the smoke-test harness can
+  // reach them. Both are DOM-free functions of their arguments. Nothing else on the
+  // app is global.
+  window.PLApp = { buildYearEndCsv: buildYearEndCsv, modelCells: modelCells };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();

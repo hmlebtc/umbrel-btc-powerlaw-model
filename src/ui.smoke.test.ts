@@ -590,8 +590,14 @@ test("pre-v0.1.7 per-line prefs are left untouched (envelope keys default off)",
 // reimplemented in the test.
 
 type CsvBuilder = (model: unknown, series: unknown, holdings: unknown, endYear: number) => string;
+type ModelCells = (model: unknown, dec31Ms: number, scale: number) => string;
+type PLApp = { buildYearEndCsv?: CsvBuilder; modelCells?: ModelCells };
 
-function evalAppCsvBuilder(): CsvBuilder {
+// Evaluate the REAL APP_JS against thin window/document stubs and hand back the
+// pure helpers it publishes on window.PLApp. window.PLChart is absent here, so the
+// app's fmtUSD falls back to its own "$" + value form — which keeps the rendered
+// cell text numerically parseable in the table tests below.
+function evalPLApp(): PLApp {
   const localStorage = makeLocalStorage(JSON.stringify({}));
   const noop = (): void => {};
   const windowStub: Record<string, unknown> = {
@@ -629,9 +635,21 @@ function evalAppCsvBuilder(): CsvBuilder {
     setIntervalStub, clearIntervalStub, setTimeoutStub, clearTimeoutStub, rafStub,
   );
 
-  const app = windowStub.PLApp as { buildYearEndCsv?: CsvBuilder } | undefined;
-  assert.ok(app && typeof app.buildYearEndCsv === "function", "window.PLApp.buildYearEndCsv not exposed");
-  return (app as { buildYearEndCsv: CsvBuilder }).buildYearEndCsv;
+  const app = windowStub.PLApp as PLApp | undefined;
+  assert.ok(app, "window.PLApp not exposed");
+  return app;
+}
+
+function evalAppCsvBuilder(): CsvBuilder {
+  const app = evalPLApp();
+  assert.ok(typeof app.buildYearEndCsv === "function", "window.PLApp.buildYearEndCsv not exposed");
+  return app.buildYearEndCsv as CsvBuilder;
+}
+
+function evalAppModelCells(): ModelCells {
+  const app = evalPLApp();
+  assert.ok(typeof app.modelCells === "function", "window.PLApp.modelCells not exposed");
+  return app.modelCells as ModelCells;
 }
 
 // A full (v0.1.7) fit carrying all thirteen percentile offsets, plus a legacy
@@ -853,4 +871,122 @@ test("CSV export: one data row per year 2010..projectionEndYear", () => {
   // a shorter projection horizon shortens the table accordingly
   const shorter = build(CSV_MODEL_FULL, CSV_PRICES, NO_HOLD, 2030);
   assert.equal(shorter.split("\r\n").length, 1 + (2030 - 2010 + 1), "endYear must bound the row count");
+});
+
+// ===========================================================================
+//  YEAR-END TABLE 0.01% FLOOR-RAIL COLUMN (spec 17, v0.1.8)
+// ===========================================================================
+
+// The <th> labels of one static header row, in document order.
+function theadLabels(rowId: string): string[] {
+  const start = DASHBOARD_HTML.indexOf('<tr id="' + rowId + '"');
+  assert.ok(start >= 0, "year-end header row " + rowId + " missing from the dashboard");
+  const end = DASHBOARD_HTML.indexOf("</tr>", start);
+  assert.ok(end > start, "year-end header row " + rowId + " is never closed");
+  const row = DASHBOARD_HTML.slice(start, end);
+  return [...row.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => (m[1] ?? "").trim());
+}
+
+test("year-end table price-mode header leads the band block with 0.01%", () => {
+  assert.deepEqual(
+    theadLabels("ytHeadPrice"),
+    ["Year", "Actual close", "0.01%", "2.5%", "16.5%", "Trend", "83.5%", "97.5%"],
+    "price-mode header row does not match the spec 17 column order",
+  );
+});
+
+test("year-end table holdings-mode header leads the band block with 0.01%", () => {
+  assert.deepEqual(
+    theadLabels("ytHeadHoldings"),
+    ["Year", "BTC", "Actual value", "0.01%", "2.5%", "16.5%", "Trend", "83.5%", "97.5%"],
+    "holdings-mode header row does not match the spec 17 column order",
+  );
+});
+
+test("year-end table help gains the verbatim floor-rail sentence", () => {
+  const sentence =
+    "The 0.01% column is the model's floor rail - the line only two days in fifteen years have ever closed below.";
+  assert.ok(DASHBOARD_HTML.includes(sentence), "floor-rail help sentence missing or not verbatim");
+  // it is APPENDED: the v0.1.5 Export-CSV paragraph still precedes it
+  const csvIdx = DASHBOARD_HTML.indexOf("Export CSV downloads this table");
+  const railIdx = DASHBOARD_HTML.indexOf(sentence);
+  assert.ok(csvIdx >= 0 && railIdx > csvIdx, "floor-rail copy did not land after the Export CSV paragraph");
+});
+
+// The rendered <td> cells of one year's model block: inner text plus the title
+// attribute, so the unavailable-column fallback can be asserted exactly.
+type Cell = { text: string; title: string | null };
+function tdCells(html: string): Cell[] {
+  return [...html.matchAll(/<td([^>]*)>([\s\S]*?)<\/td>/g)].map((m) => {
+    const attrs = m[1] ?? "";
+    const title = /title="([^"]*)"/.exec(attrs);
+    return { text: (m[2] ?? "").trim(), title: title ? (title[1] ?? "") : null };
+  });
+}
+// Guarded cell access (noUncheckedIndexedAccess).
+function cellAt(cells: Cell[], i: number): Cell {
+  const c = cells[i];
+  assert.ok(c, "year-end row has no cell at index " + i);
+  return c;
+}
+// Cell text is "$" + raw number here (no PLChart formatter in the harness).
+function cellUsd(cells: Cell[], i: number): number {
+  const text = cellAt(cells, i).text;
+  assert.ok(text.startsWith("$"), "expected a formatted USD cell, got " + text);
+  const v = Number(text.slice(1));
+  assert.ok(isFinite(v), "cell is not numeric: " + text);
+  return v;
+}
+const DEC31_2030 = Date.UTC(2030, 11, 31);
+
+test("year-end row renders six model cells with the floor rail first and ordered values", () => {
+  const modelCells = evalAppModelCells();
+  const cells = tdCells(modelCells(CSV_MODEL_FULL, DEC31_2030, 1));
+  assert.equal(cells.length, 6, "expected 0.01% | 2.5% | 16.5% | Trend | 83.5% | 97.5%");
+  // floor rail < 2.5% < 16.5% < trend < 83.5% < 97.5% — the gate's ordering check
+  const vals = cells.map((_c, i) => cellUsd(cells, i));
+  for (let i = 1; i < vals.length; i++) {
+    assert.ok(
+      (vals[i - 1] as number) < (vals[i] as number),
+      "year-end columns are not ascending at index " + i + ": " + JSON.stringify(vals),
+    );
+  }
+  // none of them carries the unavailable title on a fit that has every key
+  for (const c of cells) assert.equal(c.title, null, "a populated column carried a fallback title");
+});
+
+test("a pre-0.1.7 model renders the floor-rail cell as an em-dash, without throwing", () => {
+  const modelCells = evalAppModelCells();
+  // CSV_MODEL_LEGACY is the four-key (2.5/16.5/83.5/97.5) shape a pre-0.1.7 record has
+  const cells = tdCells(modelCells(CSV_MODEL_LEGACY, DEC31_2030, 1));
+  assert.equal(cells.length, 6, "a legacy fit must still render all six column cells");
+  assert.equal(cellAt(cells, 0).text, "—", "the missing 0.01% column should render an em-dash");
+  assert.equal(
+    cellAt(cells, 0).title,
+    "available after the next model update",
+    "the em-dash cell is missing the explanatory title",
+  );
+  // everything else on the row renders normally
+  for (let i = 1; i < cells.length; i++) {
+    assert.notEqual(cellAt(cells, i).text, "—", "column " + i + " should still render on a legacy fit");
+    assert.equal(cellAt(cells, i).title, null, "column " + i + " should not carry a fallback title");
+  }
+});
+
+test("the year-end table's floor rail follows the active band mode", () => {
+  const modelCells = evalAppModelCells();
+  // quantileRegression: the rail comes from its own fitted (then rearranged) line,
+  // so it must differ from the parallel-offset value at the same date
+  const qr = tdCells(modelCells(CSV_MODEL_QR, DEC31_2030, 1));
+  const parallel = tdCells(modelCells(CSV_MODEL_FULL, DEC31_2030, 1));
+  assert.notEqual(cellAt(qr, 0).text, cellAt(parallel, 0).text, "the rail ignored bandLines");
+  // a stale quantileRegression record (no bandLines) falls back to the offsets
+  const stale = tdCells(modelCells(CSV_MODEL_QR_STALE, DEC31_2030, 1));
+  assert.equal(cellAt(stale, 0).text, cellAt(parallel, 0).text, "stale record did not fall back to the offsets");
+  // holdings mode scales every column by the BTC amount
+  const scaled = tdCells(modelCells(CSV_MODEL_FULL, DEC31_2030, 2));
+  assert.ok(
+    Math.abs(cellUsd(scaled, 0) - 2 * cellUsd(parallel, 0)) < 1e-6,
+    "holdings scaling did not reach the floor-rail column",
+  );
 });

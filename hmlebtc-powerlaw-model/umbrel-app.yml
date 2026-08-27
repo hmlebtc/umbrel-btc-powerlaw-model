@@ -6,7 +6,7 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.7"
+version: "0.1.8"
 tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
@@ -31,6 +31,17 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.1.8 - the 0.01% floor rail joins the year-end model table.
+
+  The year-end model table gains one column: 0.01%, sitting first among the model columns in both
+  the Price and My holdings views (Year, Actual close, 0.01%, 2.5%, 16.5%, Trend, 83.5%, 97.5%).
+  It is the same floor rail v0.1.7 added to the chart - the level only a couple of days in fifteen
+  years have ever closed below - so every year now shows how far the model puts its floor beneath
+  the more familiar 2.5% line. The values follow whichever band mode is active, quantile
+  regression included, exactly like the other columns. Nothing else changes: the CSV export
+  already carried this column, tinting still applies only to the actual close, and a model fitted
+  by an older version simply shows a dash there until the next refit.
+
   v0.1.7 - an outermost 0.01% / 99.99% envelope pair, porkopolis's Q0/Q100 lines.
 
   The band ladder gains one more pair at the very outside: 0.01% and 99.99% (magenta), off by
