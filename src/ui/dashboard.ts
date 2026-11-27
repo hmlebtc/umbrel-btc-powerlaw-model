@@ -133,6 +133,9 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .seg:last-child { border-right: none; }
   .seg:hover { color: var(--text); }
   .seg-on { background: var(--btc); color: #1a1200; font-weight: 700; }
+  .seg:disabled { opacity: .45; cursor: not-allowed; }
+  .seg:disabled:hover { color: var(--muted); }
+  .seg:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
   .pill-btn { padding: 5px 11px; font: inherit; font-size: 12px; border-radius: 999px; border: 1px solid var(--border2); background: var(--card2); color: var(--muted); cursor: pointer; }
   .pill-btn:hover { color: var(--text); border-color: var(--border2); }
   .pill-on { background: rgba(247,147,26,0.16); border-color: rgba(247,147,26,0.5); color: var(--btc); font-weight: 600; }
@@ -168,6 +171,10 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   button.lg-more:hover { color: var(--text); border-color: var(--blue); }
   button.lg-more:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   .lg-more-chev { display: inline-block; }
+  /* Per-model legend sets (v0.2.0): display:contents keeps every chip a direct
+     flex item of the legend row, exactly as before the sets existed. */
+  .lg-set { display: contents; }
+  .lg-sw-dashed { background-image: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 6px); }
   .lg-more-row { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; padding-top: 2px; }
 
   /* Info ⓘ popover system (v0.1.1) */
@@ -218,6 +225,21 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
   .yt-prog { color: var(--btc); }
   .yt-beyond td { color: var(--faint); }
   .ytable-foot { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
+  /* Percentile table (v0.2.0, Refraction mode only): every row visible (no inner
+     scroll), whole dollars on wide screens, abbreviated on phones */
+  .pt-scroll { max-height: none; }
+  .usd-abbr { display: none; }
+  .ro-l .sym { text-transform: none; }
+  .rf-stale { align-self: center; cursor: help; }
+  .pt-stats { margin-bottom: 12px; }
+  table.ptable { font-size: 13.5px; }
+  .ptable th .th-sub { display: block; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--faint); font-size: 10.5px; margin-top: 1px; }
+  .ptable .pt-line-in { display: inline-flex; align-items: center; gap: 8px; }
+  .ptable .pt-sw { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  .ptable .pt-name { color: var(--faint); font-size: 11.5px; }
+  .ptable tr.pt-fair td { font-weight: 700; background: rgba(236,236,236,0.06); }
+  .ptable tr.pt-fair td:first-child { box-shadow: inset 3px 0 0 var(--trend); }
+  .ptable tr.pt-spot td { border-bottom: 2px solid rgba(66,160,76,0.75); }
   /* Red/green vs actuals (v0.1.3): model cells tinted by whether the line sat at
      or above the year's actual close. */
   td.yt-hi { color: #42A04C; }
@@ -298,6 +320,15 @@ const PAGE_HEAD: string = String.raw`<!doctype html>
     #chartWrap { height: 360px; }
     .toasts { left: 12px; right: 12px; max-width: none; }
     .refit-strip { top: 96px; }
+    /* percentile table: all five columns fit a phone without scrolling */
+    table.ptable { font-size: 12px; }
+    .ptable th, .ptable td { padding: 5px 5px; }
+    .ptable .pt-name { display: none; }
+    .ptable .pt-line-in { gap: 5px; }
+    .ptable th .th-sub { font-size: 9.5px; }
+    .ptable .th-word { display: none; }
+    #pctTableCard .usd-full { display: none; }
+    #pctTableCard .usd-abbr { display: inline; }
   }
 </style>
 </head>
@@ -344,21 +375,21 @@ const PAGE_BODY: string = String.raw`</span>
 <main>
   <section class="card" id="readoutsCard" aria-label="Model readouts">
     <div class="ro-grid">
-      <div class="ro"><div class="ro-l">Fair value now <button class="infobtn" type="button" data-help="fairValue" aria-label="About: Fair value now" aria-expanded="false">i</button></div><div class="ro-v" id="ro_fairValue">&mdash;</div><div class="ro-sub">trend price today</div></div>
-      <div class="ro"><div class="ro-l">Deviation <button class="infobtn" type="button" data-help="deviation" aria-label="About: Deviation" aria-expanded="false">i</button></div><div class="ro-v" id="ro_deviation">&mdash;</div><div class="ro-sub">spot vs trend</div></div>
-      <div class="ro"><div class="ro-l">Current quantile <button class="infobtn" type="button" data-help="quantile" aria-label="About: Current quantile" aria-expanded="false">i</button></div><div class="ro-v" id="ro_quantile">&mdash;</div><div class="ro-sub">residual percentile</div></div>
-      <div class="ro"><div class="ro-l">Exponent n <button class="infobtn" type="button" data-help="exponentN" aria-label="About: Exponent n" aria-expanded="false">i</button></div><div class="ro-v" id="ro_n">&mdash;</div><div class="ro-sub" id="ro_n_sub"></div></div>
-      <div class="ro"><div class="ro-l">Coefficient A <button class="infobtn" type="button" data-help="coeffA" aria-label="About: Coefficient A" aria-expanded="false">i</button></div><div class="ro-v" id="ro_A">&mdash;</div><div class="ro-sub" id="ro_A_sub"></div></div>
-      <div class="ro"><div class="ro-l">R&#178; <button class="infobtn" type="button" data-help="r2" aria-label="About: R squared" aria-expanded="false">i</button></div><div class="ro-v" id="ro_r2">&mdash;</div><div class="ro-sub">goodness of fit</div></div>
-      <div class="ro"><div class="ro-l">&#963; residual <button class="infobtn" type="button" data-help="sigma" aria-label="About: sigma residual" aria-expanded="false">i</button></div><div class="ro-v" id="ro_sigma">&mdash;</div><div class="ro-sub">log10 std-dev</div></div>
-      <div class="ro"><div class="ro-l">Days since genesis <button class="infobtn" type="button" data-help="days" aria-label="About: Days since genesis" aria-expanded="false">i</button></div><div class="ro-v" id="ro_days">&mdash;</div><div class="ro-sub">t, epoch 2009-01-03</div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Fair value now">Fair value now</span> <button class="infobtn" type="button" data-help="fairValue" aria-label="About: Fair value now" data-rf-aria="About: Fair value now" aria-expanded="false">i</button></div><div class="ro-v" id="ro_fairValue">&mdash;</div><div class="ro-sub" data-rf="50% line today">trend price today</div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Deviation">Deviation</span> <button class="infobtn" type="button" data-help="deviation" aria-label="About: Deviation" data-rf-aria="About: Deviation" aria-expanded="false">i</button></div><div class="ro-v" id="ro_deviation">&mdash;</div><div class="ro-sub" data-rf="spot vs fair value">spot vs trend</div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Current percentile">Current quantile</span> <button class="infobtn" type="button" data-help="quantile" aria-label="About: Current quantile" data-rf-aria="About: Current percentile" aria-expanded="false">i</button></div><div class="ro-v" id="ro_quantile">&mdash;</div><div class="ro-sub" data-rf="where spot sits on the ladder">residual percentile</div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Floor now">Exponent n</span> <button class="infobtn" type="button" data-help="exponentN" aria-label="About: Exponent n" data-rf-aria="About: Floor now" aria-expanded="false">i</button></div><div class="ro-v" id="ro_n">&mdash;</div><div class="ro-sub" id="ro_n_sub"></div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Anchor exponent">Coefficient A</span><span class="sym" data-rf=" b1"></span> <button class="infobtn" type="button" data-help="coeffA" aria-label="About: Coefficient A" data-rf-aria="About: Anchor exponent b1" aria-expanded="false">i</button></div><div class="ro-v" id="ro_A">&mdash;</div><div class="ro-sub" id="ro_A_sub"></div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Decay">R&#178;</span><span class="sym" data-rf=" c"></span> <button class="infobtn" type="button" data-help="r2" aria-label="About: R squared" data-rf-aria="About: Decay c" aria-expanded="false">i</button></div><div class="ro-v" id="ro_r2">&mdash;</div><div class="ro-sub" id="ro_r2_sub" data-rf="decay at the current height">goodness of fit</div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Top now">&#963; residual</span> <button class="infobtn" type="button" data-help="sigma" aria-label="About: sigma residual" data-rf-aria="About: Top now" aria-expanded="false">i</button></div><div class="ro-v" id="ro_sigma">&mdash;</div><div class="ro-sub" data-rf="99.9% line today">log10 std-dev</div></div>
+      <div class="ro"><div class="ro-l"><span data-rf="Block height">Days since genesis</span> <button class="infobtn" type="button" data-help="days" aria-label="About: Days since genesis" data-rf-aria="About: Block height" aria-expanded="false">i</button></div><div class="ro-v" id="ro_days">&mdash;</div><div class="ro-sub" id="ro_days_sub" data-rf="chain height">t, epoch 2009-01-03</div></div>
       <div class="ro"><div class="ro-l">Next auto-refit <button class="infobtn" type="button" data-help="nextRefit" aria-label="About: Next auto-refit" aria-expanded="false">i</button></div><div class="ro-v" id="ro_nextRefit">&mdash;</div><div class="ro-sub" id="ro_nextRefit_sub"></div></div>
     </div>
   </section>
 
   <section class="card" id="chartCard">
     <div class="card-head">
-      <h2>Power law chart</h2>
+      <h2 data-rf="Refraction chart">Power law chart</h2>
       <button class="explain-toggle" id="explainToggle" type="button" aria-expanded="false" aria-controls="explainPanel"><span class="explain-chev" id="explainChevron">&#9656;</span> What am I looking at?</button>
       <span class="hint" id="bandModeNote"></span>
     </div>
@@ -368,7 +399,23 @@ const PAGE_BODY: string = String.raw`</span>
       <p>Left of the 'today' line is history; right of it is the same formula extended forward. The hatched area past ~2040 is where the model's own authors say it should not be trusted. Halving lines mark Bitcoin's supply-cut events (dashed ones are estimates).</p>
       <p>The oscillator below divides price by trend (1.0x = exactly on trend) - it is the same information as the bands, flattened out. Drag to move around the chart, hold Shift and drag to select a range to zoom into, scroll to zoom at the cursor, and double-click to reset the view.</p>
     </div>
+    <div class="chart-explain" id="explainPanelRf" style="display:none">
+      <p>This is the Refraction model, created by Plan C (@TheRealPlanC). The app is an independent re-implementation: it refits every line from its own data at each update and copies no numbers from his charts. The green line is Bitcoin's actual daily price; the ring at the end is the live price for today, which isn't final until the day closes.</p>
+      <p>The model keeps time in blocks, not calendar days. Block height - the number of blocks mined so far - is the network's own clock ("protocol time"): it is what the supply schedule and the halvings run on, and it does not tick at exactly the same rate as the calendar. Past dates use the real chain height at each day's close; future dates add 144 blocks a day, the protocol's target of one block every ten minutes.</p>
+      <p>The solid blue line is the anchor: the 5% line, a straight power of block height drawn so that price has closed below it on only 5% of days. The lines above it measure how far price has run above the anchor, and that reach shrinks as the chain grows - each one bends gradually toward the anchor, so the band narrows over time instead of keeping a constant width. The lines below the anchor (1% and the 0.1% floor) stay parallel to it.</p>
+      <p>Every line is a percentile of the model's own history: price has closed below the 50% line - the model's fair value, in white - on half of all days, below the 95% line on 95% of days, and below the 0.1% floor on about one day in a thousand. The shaded zones between the lines run from cool (low in the range) to hot (high in the range); open 'More bands' for the 1/15/25/75% lines. <span id="rfExplainSources">Prices are Coin Metrics daily closes, the series the author uses. </span>Block heights come from Coin Metrics daily block counts, checked against mempool.space; the live chain tip comes from mempool.space, Blockstream and blockchain.info.</p>
+      <p>Caveats: the lines are calibrated on the same history they describe, so they are descriptions of the past, not guarantees about the future. The 99.9% top rests on a handful of extreme days. If Coin Metrics prices are unavailable the app falls back to its own price series, which moves the top line by several percent (the corner note says which series is in use). The author publishes five-year projections; everything right of 'today' is the fitted model extended forward at 144 blocks a day, and the hatched area from ~2040 marks the far range, well beyond anything he has published. Not financial advice.</p>
+      <p>The oscillator below divides price by the fair value (1.0x = exactly on the 50% line), with the other visible lines as guide curves. Drag to move around the chart, hold Shift and drag to select a range to zoom into, scroll to zoom at the cursor, and double-click to reset the view.</p>
+    </div>
     <div class="chart-controls">
+      <div class="ctl-group" id="modelCtl"><span class="ctl-label">Model</span>
+        <div class="seg-group" role="group" aria-label="Model">
+          <button class="seg seg-on" id="model_powerLaw" type="button" aria-pressed="true">Power law</button>
+          <button class="seg" id="model_refraction" type="button" aria-pressed="false" disabled title="Loading the Refraction model&hellip;">Refraction</button>
+        </div>
+        <button class="infobtn" type="button" data-help="modelSwitch" aria-label="About: Model switch" aria-expanded="false">i</button>
+        <span class="chip chip-warn rf-stale" id="rfStaleChip" role="status" style="display:none"></span>
+      </div>
       <div class="ctl-group"><span class="ctl-label">X</span>
         <div class="seg-group" role="group" aria-label="X axis mode">
           <button class="seg" id="xMode_date" type="button">Date</button>
@@ -395,14 +442,25 @@ const PAGE_BODY: string = String.raw`</span>
       </div>
     </div>
     <div class="chart-legend" id="chartLegend" role="group" aria-label="Chart series legend and percentile line toggles">
+      <span class="lg-set" id="plLegendMain">
       <span class="lg"><span class="lg-sw" style="background:#42a04c"></span>Price</span>
       <span class="lg"><span class="lg-sw" style="background:#ececec"></span>Trend</span>
       <button class="lg-band" type="button" id="lg_p025" data-band="p025" aria-pressed="true" aria-label="Toggle the 2.5% line"><span class="lg-sw" style="background:#f44336"></span>2.5%</button>
       <button class="lg-band" type="button" id="lg_p165" data-band="p165" aria-pressed="true" aria-label="Toggle the 16.5% line"><span class="lg-sw" style="background:#03a9f4"></span>16.5%</button>
       <button class="lg-band" type="button" id="lg_p835" data-band="p835" aria-pressed="true" aria-label="Toggle the 83.5% line"><span class="lg-sw" style="background:#03a9f4"></span>83.5%</button>
       <button class="lg-band" type="button" id="lg_p975" data-band="p975" aria-pressed="true" aria-label="Toggle the 97.5% line"><span class="lg-sw" style="background:#f44336"></span>97.5%</button>
+      </span>
+      <span class="lg-set" id="rfLegendMain" style="display:none">
+        <span class="lg"><span class="lg-sw" style="background:#42a04c"></span>Price</span>
+        <button class="lg-band" type="button" id="lg_r01" data-rfline="r01" aria-pressed="true" aria-label="Toggle the 0.1% floor line"><span class="lg-sw" style="background:#a78bfa"></span>0.1% floor</button>
+        <button class="lg-band" type="button" id="lg_r5" data-rfline="r5" aria-pressed="true" aria-label="Toggle the 5% anchor line"><span class="lg-sw" style="background:#60a5fa"></span>5% anchor</button>
+        <button class="lg-band" type="button" id="lg_r50" data-rfline="r50" aria-pressed="true" aria-label="Toggle the 50% fair value line"><span class="lg-sw" style="background:#ececec;height:4px"></span>50% fair value</button>
+        <button class="lg-band" type="button" id="lg_r95" data-rfline="r95" aria-pressed="true" aria-label="Toggle the 95% line"><span class="lg-sw lg-sw-dashed" style="color:#ff9f43"></span>95%</button>
+        <button class="lg-band" type="button" id="lg_r999" data-rfline="r999" aria-pressed="true" aria-label="Toggle the 99.9% top line"><span class="lg-sw" style="background:#ff5c7a"></span>99.9% top</button>
+      </span>
       <button class="lg-more" type="button" id="moreBandsToggle" aria-expanded="false" aria-controls="moreBandsRow">More bands <span class="lg-more-chev" id="moreBandsChev">&#9662;</span></button>
       <span class="lg-more-row" id="moreBandsRow" style="display:none">
+        <span class="lg-set" id="plLegendMore">
         <button class="lg-band" type="button" id="lg_p0001" data-band="p0001" aria-pressed="false" aria-label="Toggle the 0.01% line"><span class="lg-sw" style="background:#e91e63"></span>0.01%</button>
         <button class="lg-band" type="button" id="lg_p005" data-band="p005" aria-pressed="false" aria-label="Toggle the 0.5% line"><span class="lg-sw" style="background:#ab47bc"></span>0.5%</button>
         <button class="lg-band" type="button" id="lg_p10" data-band="p10" aria-pressed="false" aria-label="Toggle the 10% line"><span class="lg-sw" style="background:#ff9800"></span>10%</button>
@@ -412,25 +470,60 @@ const PAGE_BODY: string = String.raw`</span>
         <button class="lg-band" type="button" id="lg_p90" data-band="p90" aria-pressed="false" aria-label="Toggle the 90% line"><span class="lg-sw" style="background:#ff9800"></span>90%</button>
         <button class="lg-band" type="button" id="lg_p995" data-band="p995" aria-pressed="false" aria-label="Toggle the 99.5% line"><span class="lg-sw" style="background:#ab47bc"></span>99.5%</button>
         <button class="lg-band" type="button" id="lg_p9999" data-band="p9999" aria-pressed="false" aria-label="Toggle the 99.99% line"><span class="lg-sw" style="background:#e91e63"></span>99.99%</button>
+        </span>
+        <span class="lg-set" id="rfLegendMore" style="display:none">
+          <button class="lg-band" type="button" id="lg_r1" data-rfline="r1" aria-pressed="false" aria-label="Toggle the 1% line"><span class="lg-sw lg-sw-dashed" style="color:#818cf8"></span>1%</button>
+          <button class="lg-band" type="button" id="lg_r15" data-rfline="r15" aria-pressed="false" aria-label="Toggle the 15% line"><span class="lg-sw lg-sw-dashed" style="color:#38bdf8"></span>15%</button>
+          <button class="lg-band" type="button" id="lg_r25" data-rfline="r25" aria-pressed="false" aria-label="Toggle the 25% line"><span class="lg-sw lg-sw-dashed" style="color:#5eead4"></span>25%</button>
+          <button class="lg-band" type="button" id="lg_r75" data-rfline="r75" aria-pressed="false" aria-label="Toggle the 75% line"><span class="lg-sw lg-sw-dashed" style="color:#f5d547"></span>75%</button>
+        </span>
       </span>
     </div>
     <div id="chartWrap">
-      <canvas id="chartCanvas" role="img" aria-label="Bitcoin price with power-law trend and percentile bands"></canvas>
+      <canvas id="chartCanvas" role="img" aria-label="Bitcoin price with power-law trend and percentile bands" data-rf-aria="Bitcoin price with the Refraction model percentile lines against block height"></canvas>
       <div class="pltip" id="chartTip"></div>
     </div>
     <div id="oscWrap">
-      <div class="osc-title">Price / trend oscillator (log scale)</div>
-      <canvas id="oscCanvas" role="img" aria-label="Price to trend ratio oscillator"></canvas>
+      <div class="osc-title" data-rf="Price / fair value oscillator (log scale)">Price / trend oscillator (log scale)</div>
+      <canvas id="oscCanvas" role="img" aria-label="Price to trend ratio oscillator" data-rf-aria="Price to fair value ratio oscillator"></canvas>
+    </div>
+  </section>
+
+  <section class="card" id="pctTableCard" style="display:none">
+    <div class="card-head">
+      <button class="settings-toggle" id="pctTableToggle" type="button" aria-expanded="true" aria-controls="pctTableBody">
+        <span id="pctTableChevron">&#9662;</span> Percentile table
+      </button>
+      <button class="infobtn" type="button" data-help="pctTable" aria-label="About: Percentile table" aria-expanded="false">i</button>
+      <span class="hint">each line today and 1, 3 and 5 years out</span>
+    </div>
+    <div id="pctTableBody">
+      <div class="milestones pt-stats" id="pctTableStats"></div>
+      <div class="ytable-scroll pt-scroll">
+        <table class="ytable ptable">
+          <thead>
+            <tr id="ptHead">
+              <th scope="col">Line</th>
+              <th scope="col">Today</th>
+              <th scope="col">1 year</th>
+              <th scope="col">3 years</th>
+              <th scope="col">5 years</th>
+            </tr>
+          </thead>
+          <tbody id="pctTableRows"></tbody>
+        </table>
+      </div>
+      <div class="ytable-foot" id="pctTableFoot"></div>
     </div>
   </section>
 
   <section class="card" id="milestonesCard">
-    <div class="card-head"><h2>Milestones</h2><span class="hint">trend value at each Jan 1, plus the $1M crossing</span></div>
+    <div class="card-head"><h2>Milestones</h2><span class="hint" data-rf="fair value (50% line) at each Jan 1, plus the $1M crossing">trend value at each Jan 1, plus the $1M crossing</span></div>
     <div class="milestones">
-      <div class="mstile"><div class="l">2030</div><div class="v" id="ms_2030">&mdash;</div><div class="s">Jan 1 trend</div></div>
-      <div class="mstile"><div class="l">2035</div><div class="v" id="ms_2035">&mdash;</div><div class="s">Jan 1 trend</div></div>
-      <div class="mstile"><div class="l">2040</div><div class="v" id="ms_2040">&mdash;</div><div class="s">Jan 1 trend</div></div>
-      <div class="mstile"><div class="l">2045</div><div class="v" id="ms_2045">&mdash;</div><div class="s">Jan 1 trend</div></div>
+      <div class="mstile"><div class="l">2030</div><div class="v" id="ms_2030">&mdash;</div><div class="s" data-rf="Jan 1 fair value">Jan 1 trend</div></div>
+      <div class="mstile"><div class="l">2035</div><div class="v" id="ms_2035">&mdash;</div><div class="s" data-rf="Jan 1 fair value">Jan 1 trend</div></div>
+      <div class="mstile"><div class="l">2040</div><div class="v" id="ms_2040">&mdash;</div><div class="s" data-rf="Jan 1 fair value">Jan 1 trend</div></div>
+      <div class="mstile"><div class="l">2045</div><div class="v" id="ms_2045">&mdash;</div><div class="s" data-rf="Jan 1 fair value">Jan 1 trend</div></div>
       <div class="mstile hl"><div class="l">$1M crossing</div><div class="v" id="ms_1m">&mdash;</div><div class="s" id="ms_1m_sub"></div></div>
     </div>
     <div class="fchips" id="falsifiability"></div>
@@ -478,11 +571,32 @@ const PAGE_BODY: string = String.raw`</span>
               <th scope="col">83.5%</th>
               <th scope="col">97.5%</th>
             </tr>
+            <tr id="ytHeadRfPrice" style="display:none">
+              <th scope="col">Year</th>
+              <th scope="col">Actual close</th>
+              <th scope="col">0.1%</th>
+              <th scope="col">5%</th>
+              <th scope="col">50%</th>
+              <th scope="col">75%</th>
+              <th scope="col">95%</th>
+              <th scope="col">99.9%</th>
+            </tr>
+            <tr id="ytHeadRfHoldings" style="display:none">
+              <th scope="col">Year</th>
+              <th scope="col">BTC</th>
+              <th scope="col">Actual value</th>
+              <th scope="col">0.1%</th>
+              <th scope="col">5%</th>
+              <th scope="col">50%</th>
+              <th scope="col">75%</th>
+              <th scope="col">95%</th>
+              <th scope="col">99.9%</th>
+            </tr>
           </thead>
           <tbody id="yearTableRows"></tbody>
         </table>
       </div>
-      <div class="ytable-foot" id="yearTableFoot" style="display:none">Years beyond ~2040 exceed the model author's stated validity horizon.</div>
+      <div class="ytable-foot" id="yearTableFoot" style="display:none" data-rf="Years after today are the fitted model extended forward at 144 blocks a day; the author publishes five-year projections, and the faded years from ~2040 are far beyond them.">Years beyond ~2040 exceed the model author's stated validity horizon.</div>
     </div>
   </section>
 
@@ -519,9 +633,17 @@ const PAGE_BODY: string = String.raw`</span>
               <div class="field-err" id="err_projectionEndYear"></div>
             </div>
           </div>
-          <div class="field-2">
+          <div class="field-3">
             <div class="field">
-              <div class="field-head"><label for="cfg_bandMode">Band mode</label><button class="infobtn" type="button" data-help="bandMode" aria-label="About: Band mode" aria-expanded="false">i</button></div>
+              <div class="field-head"><label for="cfg_model">Model</label><button class="infobtn" type="button" data-help="model" aria-label="About: Model" aria-expanded="false">i</button></div>
+              <select id="cfg_model">
+                <option value="powerLaw">Power law</option>
+                <option value="refraction">Refraction (Plan C)</option>
+              </select>
+              <div class="field-err" id="err_model"></div>
+            </div>
+            <div class="field">
+              <div class="field-head"><label for="cfg_bandMode">Band mode <span class="lbl-note">(power-law model only)</span></label><button class="infobtn" type="button" data-help="bandMode" aria-label="About: Band mode" aria-expanded="false">i</button></div>
               <select id="cfg_bandMode">
                 <option value="pointInTime">Point-in-time (porkopolis post-2025)</option>
                 <option value="fullSample">Full-sample percentiles</option>
@@ -550,6 +672,8 @@ const PAGE_BODY: string = String.raw`</span>
             <label class="check"><input id="cfg_src_coinbase" type="checkbox"><span>coinbase</span></label>
             <label class="check"><input id="cfg_src_mempoolSpace" type="checkbox"><span>mempoolSpace</span></label>
             <label class="check"><input id="cfg_src_coingecko" type="checkbox"><span>coingecko</span></label>
+            <label class="check"><input id="cfg_src_coinmetrics" type="checkbox"><span>coinmetrics</span></label>
+            <label class="check"><input id="cfg_src_blockstream" type="checkbox"><span>blockstream</span></label>
           </div>
           <div class="field-err" id="err_sources"></div>
         </fieldset>

@@ -28,7 +28,7 @@ ARG GIT_SHA=dev
 # excludes hmlebtc-powerlaw-model/ (the Umbrel app dir where the
 # canonical umbrel-app.yml lives), so version.ts cannot read the manifest
 # off disk during a Docker build - without this arg it falls back to the
-# version baked into package.json instead (which is also kept at 0.1.0).
+# version baked into package.json instead (kept in lockstep with the manifest by hand).
 ARG APP_VERSION=unknown
 
 # ---------------------------------------------------------------------------

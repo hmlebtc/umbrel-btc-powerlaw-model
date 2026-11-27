@@ -8,17 +8,20 @@
  */
 
 import { EventLog } from './events.js';
-import { JobRunner, JobStats, ModelStore } from './jobs.js';
+import { HeightStore } from './heightStore.js';
+import { JobRunner, JobStats, ModelStore, startupJobKind } from './jobs.js';
 import { log, logError } from './log.js';
 import { PriceStore } from './priceStore.js';
 import { Scheduler } from './scheduler.js';
 import { createApiServer, type AppContext } from './server.js';
-import { loadSettings, SettingsStore } from './settings.js';
+import { loadSettings, SettingsStore, takeSettingsNotices } from './settings.js';
 import { createBinanceSource } from './sources/binance.js';
 import { createBitstampSource } from './sources/bitstamp.js';
 import { createBlockchainInfoSource } from './sources/blockchainInfo.js';
+import { createBlockstreamSource } from './sources/blockstream.js';
 import { createCoinbaseSource } from './sources/coinbase.js';
 import { createCoingeckoSource } from './sources/coingecko.js';
+import { createCoinMetricsSource } from './sources/coinmetrics.js';
 import { createKrakenSource } from './sources/kraken.js';
 import { createMempoolSpaceSource } from './sources/mempoolSpace.js';
 import { createMockSources, SourceRegistry, type PriceSource } from './sources/types.js';
@@ -35,6 +38,8 @@ function createRealSources(): PriceSource[] {
     createCoinbaseSource(),
     createMempoolSpaceSource(),
     createCoingeckoSource(),
+    createCoinMetricsSource(),
+    createBlockstreamSource(),
   ];
 }
 
@@ -45,16 +50,19 @@ function main(): void {
 
   const settings = new SettingsStore(dataDir, loadSettings(dataDir));
   const events = new EventLog(dataDir);
+  for (const notice of takeSettingsNotices()) events.add('settings', notice);
   const getSettings = (): ReturnType<SettingsStore['get']> => settings.get();
 
   const registry = new SourceRegistry(mock ? createMockSources() : createRealSources());
   const priceStore = new PriceStore(dataDir);
+  const heightStore = new HeightStore(dataDir);
   const modelStore = new ModelStore(dataDir);
   const jobStats = new JobStats(dataDir);
   const spot = new SpotAggregator(registry, getSettings, events);
   const jobRunner = new JobRunner({
     registry,
     priceStore,
+    heightStore,
     spot,
     getSettings,
     modelStore,
@@ -66,6 +74,7 @@ function main(): void {
   const ctx: AppContext = {
     settings,
     priceStore,
+    heightStore,
     modelStore,
     spot,
     jobRunner,
@@ -91,9 +100,16 @@ function main(): void {
   server.listen(port, '0.0.0.0', () => {
     log(`${APP_NAME} v${APP_VERSION} (${GIT_SHA}) listening on 0.0.0.0:${port}`);
     log(`data dir: ${dataDir}${mock ? ' (MOCK mode)' : ''}`);
-    if (priceStore.count() === 0 || modelStore.current() === null) {
+    // Boot job (R5): initial-sync when there is no data; one ordinary refit when an
+    // upgrade finds a model without Refraction and no heights yet.
+    const bootJob = startupJobKind(priceStore.count(), modelStore.current(), heightStore.count());
+    if (bootJob === 'initial-sync') {
       log('no prior data — starting initial sync');
       jobRunner.start('initial-sync');
+    } else if (bootJob === 'refit') {
+      log('upgrade detected (no Refraction fit, no heights) — starting a refit');
+      events.add('system', 'upgrade: starting a refit to build block heights and the Refraction fit');
+      jobRunner.start('refit');
     }
     scheduler.start();
     events.add('system', `${APP_NAME} started`);

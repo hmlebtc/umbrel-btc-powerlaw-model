@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 
 import { log } from './log.js';
-import type { BandMode, EnabledSources, Settings, SourceMode } from './types.js';
+import type { BandMode, EnabledSources, ModelKind, Settings, SourceMode } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Defaults — must match the compose env defaults (Agent C) so a fresh install
@@ -27,6 +27,7 @@ export function defaultSettings(): Settings {
     spotPollMinutes: 5,
     projectionEndYear: 2045,
     bandMode: 'pointInTime',
+    model: 'powerLaw',
     sourceMode: 'auto',
     enabledSources: {
       blockchainInfo: true,
@@ -36,6 +37,10 @@ export function defaultSettings(): Settings {
       coinbase: true,
       mempoolSpace: true,
       coingecko: true,
+      // v0.2.0 block-height sources. A settings.json written before them simply
+      // lacks the keys; deepMerge + the per-key coercion below default them to true.
+      coinmetrics: true,
+      blockstream: true,
     },
     // Personal what-if amounts (spec 13.2); empty + off on a fresh install.
     holdings: {
@@ -57,6 +62,7 @@ const SPOT_SOURCE_KEYS: Array<keyof EnabledSources> = [
 ];
 
 const BAND_MODES: BandMode[] = ['pointInTime', 'fullSample', 'quantileRegression'];
+const MODELS: ModelKind[] = ['powerLaw', 'refraction'];
 const SOURCE_MODES: SourceMode[] = ['auto', 'manual'];
 
 // ---------------------------------------------------------------------------
@@ -139,6 +145,9 @@ export function validateSettings(input: Settings): ValidationResult {
   }
   if (!BAND_MODES.includes(c.bandMode)) {
     reset('bandMode', `bandMode must be one of ${BAND_MODES.map((m) => `'${m}'`).join(', ')}`);
+  }
+  if (!MODELS.includes(c.model)) {
+    reset('model', `model must be one of ${MODELS.map((m) => `'${m}'`).join(', ')}`);
   }
   if (!SOURCE_MODES.includes(c.sourceMode)) {
     reset('sourceMode', "sourceMode must be 'auto' or 'manual'");
@@ -256,6 +265,7 @@ export function seedSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): Setti
   const endYear = envInt(env.BPL_PROJECTION_END_YEAR);
   if (endYear !== undefined) c.projectionEndYear = endYear;
   if (env.BPL_BAND_MODE) c.bandMode = env.BPL_BAND_MODE as BandMode;
+  if (env.BPL_MODEL) c.model = env.BPL_MODEL as ModelKind;
   if (env.BPL_SOURCE_MODE) c.sourceMode = env.BPL_SOURCE_MODE as SourceMode;
 
   // NOTE (spec 13.2): `holdings` is deliberately NOT seeded from any BPL_* env
@@ -288,6 +298,29 @@ export function saveSettings(dataDir: string, settings: Settings): void {
   atomicWriteJson(settingsPath(dataDir), settings);
 }
 
+/** Sources added in v0.2.0 whose absence in a manual-mode file means "off" (R11). */
+export const V020_SOURCES = ['coinmetrics', 'blockstream'] as const;
+
+// Notices raised while loading (R11); main.ts drains them into the activity log once
+// the EventLog exists (loadSettings runs before it).
+const pendingNotices: string[] = [];
+
+/** Take (and clear) the activity-log notices raised by loadSettings since the last call. */
+export function takeSettingsNotices(): string[] {
+  return pendingNotices.splice(0, pendingNotices.length);
+}
+
+/**
+ * The v0.2.0 source keys a persisted manual-mode file lacks (R11). A user who chose
+ * `manual` picked their outbound hosts deliberately, so the two new hosts must not be
+ * switched on behind their back; auto mode and fresh installs keep the default (true).
+ */
+export function manualModeMissingSources(parsed: unknown): string[] {
+  if (!isPlainObject(parsed) || parsed.sourceMode !== 'manual') return [];
+  const es = isPlainObject(parsed.enabledSources) ? parsed.enabledSources : {};
+  return V020_SOURCES.filter((k) => !(k in es));
+}
+
 export function loadSettings(dataDir: string, env: NodeJS.ProcessEnv = process.env): Settings {
   const path = settingsPath(dataDir);
   if (!existsSync(path)) {
@@ -301,7 +334,24 @@ export function loadSettings(dataDir: string, env: NodeJS.ProcessEnv = process.e
   } catch {
     return defaultSettings();
   }
-  return sanitizeSettings(deepMerge(defaultSettings(), parsed), 'settings.json');
+  const merged = deepMerge(defaultSettings(), parsed);
+  const off = manualModeMissingSources(parsed);
+  if (off.length > 0) {
+    for (const k of off) (merged.enabledSources as unknown as Record<string, boolean>)[k] = false;
+    const settings = sanitizeSettings(merged, 'settings.json');
+    // Persist so the notice is raised exactly once (the next load finds the keys).
+    try {
+      saveSettings(dataDir, settings);
+    } catch {
+      /* the in-memory value still applies; the notice may repeat next boot */
+    }
+    pendingNotices.push(
+      `manual source mode: new sources ${off.join(' and ')} were left OFF because you choose your own outbound hosts; ` +
+        'enable them under Settings > Enabled sources to get block heights and the Refraction model',
+    );
+    return settings;
+  }
+  return sanitizeSettings(merged, 'settings.json');
 }
 
 /**

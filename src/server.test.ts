@@ -14,6 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { EventLog } from './events.js';
 import { JobRunner, JobStats, ModelStore } from './jobs.js';
 import { PriceStore } from './priceStore.js';
+import { HeightStore } from './heightStore.js';
 import { createApiServer, type AppContext } from './server.js';
 import { defaultSettings, SettingsStore } from './settings.js';
 import { createMockSources, SourceRegistry, type PriceSource } from './sources/types.js';
@@ -42,14 +43,16 @@ function buildCtx(sources?: PriceSource[]): Harness {
   const getSettings = () => settings.get();
   const registry = new SourceRegistry(sources ?? createMockSources());
   const priceStore = new PriceStore();
+  const heightStore = new HeightStore();
   const modelStore = new ModelStore();
   const jobStats = new JobStats();
   const events = new EventLog();
   const spot = new SpotAggregator(registry, getSettings);
-  const jobRunner = new JobRunner({ registry, priceStore, spot, getSettings, modelStore, jobStats, events });
+  const jobRunner = new JobRunner({ registry, priceStore, heightStore, spot, getSettings, modelStore, jobStats, events });
   const ctx: AppContext = {
     settings,
     priceStore,
+    heightStore,
     modelStore,
     spot,
     jobRunner,
@@ -128,6 +131,132 @@ test('GET / -> 200 HTML and /favicon.svg -> image/svg+xml', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// /api/heights (v0.2.0) + the two new sources in /api/status.
+// ---------------------------------------------------------------------------
+
+test('GET /api/heights: 404 envelope until a height is stored, then the dense payload', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const empty = await getJSON(baseUrl, '/api/heights');
+      assert.equal(empty.status, 404);
+      assert.equal(empty.body.ok, false);
+      assert.equal(typeof empty.body.error, 'string');
+
+      await runRefit(ctx);
+      const { status, body } = await getJSON(baseUrl, '/api/heights');
+      assert.equal(status, 200);
+      assert.equal(body.ok, true);
+      assert.deepEqual(Object.keys(body.data).sort(), ['count', 'end', 'heights', 'start', 'tip']);
+      const d = body.data;
+      assert.equal(d.start, '2009-01-03');
+      assert.equal(d.count, d.heights.length);
+      assert.equal(d.heights[0], 0);
+      // Index i is start + i days: the last entry is `end`, and heights never decrease.
+      const days = (Date.parse(d.end + 'T00:00:00Z') - Date.parse(d.start + 'T00:00:00Z')) / 86_400_000;
+      assert.equal(d.count, days + 1);
+      for (let i = 1; i < d.heights.length; i++) assert.ok(d.heights[i] >= d.heights[i - 1]);
+      assert.ok(d.tip && d.tip.height >= d.heights[d.heights.length - 1] && typeof d.tip.at === 'string');
+      assert.equal(d.heights[d.heights.length - 1], ctx.heightStore.series().at(-1)!.h);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('/api/model + /api/status: refraction blocks appear after a refit; existing keys untouched', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      // Before any fit: neither block, and the legacy status keys are all present.
+      const before = (await getJSON(baseUrl, '/api/status')).body.data;
+      assert.equal('refraction' in before, false);
+
+      await runRefit(ctx);
+      const model = (await getJSON(baseUrl, '/api/model')).body.data;
+      const r = model.refraction;
+      for (const k of ['b0', 'b1', 'c', 'alpha', 'gridPcts', 'gridOffsets', 'points', 'dataStart', 'dataEnd', 'lastHeight', 'priceSeries']) {
+        assert.ok(k in r, `model.refraction.${k} missing`);
+      }
+      assert.equal(r.priceSeries, 'coinmetrics');
+      assert.equal(model.history[0].refractionB1, r.b1);
+      assert.equal(model.history[0].refractionC, r.c);
+      for (const k of ['a', 'n', 'r2', 'sigma', 'bandMode', 'bandOffsets', 'sample', 'projection', 'falsifiability', 'milestones', 'history']) {
+        assert.ok(k in model, `existing /api/model key ${k} lost`);
+      }
+
+      const status = (await getJSON(baseUrl, '/api/status')).body.data;
+      const st = status.refraction;
+      assert.deepEqual(
+        Object.keys(st).sort(),
+        ['anchorNow', 'b1', 'c', 'dataEnd', 'deviationPct', 'fairValueNow', 'floorNow', 'heightIsLive', 'heightNow', 'lastClose', 'percentile', 'points', 'priceSeries', 'staleDays', 'topNow'],
+      );
+      assert.equal(st.b1, r.b1);
+      assert.ok(st.floorNow < st.anchorNow && st.anchorNow < st.fairValueNow && st.fairValueNow < st.topNow);
+      assert.equal(typeof st.percentile, 'number');
+      assert.deepEqual(Object.keys(st.lastClose).sort(), ['date', 'fairValue', 'height', 'percentile', 'usd']);
+      assert.equal(st.lastClose.date, r.dataEnd);
+      assert.ok(st.lastClose.percentile > 0 && st.lastClose.percentile < 100 && st.lastClose.fairValue > 0);
+      assert.equal(typeof st.deviationPct, 'number');
+      // The mock tip was just observed, so the height is live and equals it.
+      assert.equal(st.heightIsLive, true);
+      assert.equal(st.heightNow, ctx.heightStore.tip()!.height);
+      for (const k of ['fairValueNow', 'deviationPct', 'currentQuantile', 'model', 'spot', 'sources']) assert.ok(k in status);
+
+      // A tip older than 3 h is not live: the height is projected from the last stored day.
+      ctx.heightStore.setTip(1, Date.now() - 4 * 3_600_000);
+      const stale = (await getJSON(baseUrl, '/api/status')).body.data.refraction;
+      assert.equal(stale.heightIsLive, false);
+      const last = ctx.heightStore.series().at(-1)!;
+      assert.ok(stale.heightNow >= last.h);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('PUT /api/settings {model}: switches the displayed model without starting a refit; bad value is a 400', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const ok = await putJSON(baseUrl, '/api/settings', { model: 'refraction' });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.body.data.model, 'refraction');
+      assert.equal(ctx.jobRunner.current(), null);
+      assert.equal(ctx.jobRunner.last(), null);
+      const bad = await putJSON(baseUrl, '/api/settings', { model: 'eqm' });
+      assert.equal(bad.status, 400);
+      assert.ok(bad.body.errors.some((e: string) => e.includes('model')));
+      assert.equal(ctx.settings.get().model, 'refraction');
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('GET /api/status: lists coinmetrics and blockstream with the height kind', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const { body } = await getJSON(baseUrl, '/api/status');
+      const rows = body.data.sources as Array<{ name: string; kinds: string[]; enabled: boolean }>;
+      for (const name of ['coinmetrics', 'blockstream']) {
+        const row = rows.find((r) => r.name === name);
+        assert.ok(row, `${name} missing from /api/status sources`);
+        assert.ok(row!.kinds.includes('height'));
+        assert.equal(row!.enabled, true);
+      }
+      assert.deepEqual(
+        rows.map((r) => r.name).sort(),
+        ['binance', 'bitstamp', 'blockchainInfo', 'blockstream', 'coinbase', 'coingecko', 'coinmetrics', 'kraken', 'mempoolSpace'],
+      );
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // /api/status envelope + fields (before and after a fit).
 // ---------------------------------------------------------------------------
 
@@ -158,7 +287,7 @@ test('GET /api/status: section-6 envelope with the documented keys', async () =>
       // Before any fit.
       assert.equal(body.data.initialSyncDone, false);
       assert.equal(body.data.model, null);
-      assert.ok(Array.isArray(body.data.sources) && body.data.sources.length === 7);
+      assert.ok(Array.isArray(body.data.sources) && body.data.sources.length === 9);
     });
   } finally {
     cleanup();
@@ -250,6 +379,7 @@ test('GET /api/model: serves a pre-v0.1.1 4-key bandOffsets record as-is (backwa
     const ctx: AppContext = {
       settings,
       priceStore,
+      heightStore: new HeightStore(),
       modelStore,
       spot,
       jobRunner,
@@ -329,6 +459,7 @@ test('GET /api/model: serves a pre-v0.1.2 8-key bandOffsets record as-is (backwa
     const ctx: AppContext = {
       settings,
       priceStore,
+      heightStore: new HeightStore(),
       modelStore,
       spot,
       jobRunner,
@@ -455,6 +586,7 @@ test('GET /api/model: a record without bandLines is served as-is (legacy + stale
       const ctx: AppContext = {
         settings,
         priceStore,
+        heightStore: new HeightStore(),
         modelStore,
         spot,
         jobRunner,
@@ -627,6 +759,7 @@ test('server boots against a legacy settings.json without holdings (backward-com
     const ctx: AppContext = {
       settings,
       priceStore,
+      heightStore: new HeightStore(),
       modelStore,
       spot,
       jobRunner,
@@ -736,6 +869,30 @@ test('GET /api/events: array, honours limit', async () => {
       assert.ok(Array.isArray(body.data));
       assert.equal(body.data.length, 2);
       assert.equal(body.data[0].msg, 'three'); // newest first
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('PUT /api/settings: a model-only change is quiet; other changes (alone or with model) and no-ops log as before', async () => {
+  const { ctx, cleanup } = buildCtx();
+  try {
+    await withServer(ctx, async (baseUrl) => {
+      const count = () => ctx.events.list().filter((e) => e.msg === 'settings updated via API').length;
+      assert.equal(count(), 0);
+      await putJSON(baseUrl, '/api/settings', { model: 'refraction' });
+      assert.equal(count(), 0, 'model-only change must not log');
+      await putJSON(baseUrl, '/api/settings', { model: 'powerLaw' });
+      assert.equal(count(), 0);
+      await putJSON(baseUrl, '/api/settings', { refitIntervalHours: 24 });
+      assert.equal(count(), 1);
+      await putJSON(baseUrl, '/api/settings', { model: 'refraction', spotPollMinutes: 7 });
+      assert.equal(count(), 2, 'model together with another change logs');
+      await putJSON(baseUrl, '/api/settings', { refitIntervalHours: 24 }); // no effective change, as in v0.1.8
+      assert.equal(count(), 3);
+      await putJSON(baseUrl, '/api/settings', { model: 'refraction' }); // model unchanged too: a no-op
+      assert.equal(count(), 4);
     });
   } finally {
     cleanup();

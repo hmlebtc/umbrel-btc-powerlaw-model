@@ -33,9 +33,12 @@
 //
 // Marker: PLCHART_ENGINE
 
+import { REFRACTION_JS } from './refractionClient.js';
+
 export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 "use strict";
 (function () {
+` + REFRACTION_JS + String.raw`
   // ---- constants ----------------------------------------------------------
   var GENESIS = Date.UTC(2009, 0, 3);   // power-law epoch; t = days since this
   var DAY = 86400000;
@@ -116,6 +119,33 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     { lo: "p25",  hi: "p75",  fill: "rgba(38,166,154,0.09)" }
   ];
 
+  // ---- Refraction ladder (v0.2.0, spec 6.3) -------------------------------
+  // The nine Refraction lines, drawn top-down (99.9% first), derived from the one
+  // ladder list in the shared snippet (RF.LINES: key, colour, dash, width). They
+  // use the same field names as BAND_LINES ("off" = legend/pref key, "pct" = label)
+  // so the shared drawing paths take either list; "p" is the percentile the
+  // evaluator is asked for, "w" the width, "tip" the tooltip label.
+  var RF_LINES = [];
+  (function () {
+    for (var i = RF.LINES.length - 1; i >= 0; i--) {
+      var L = RF.LINES[i];
+      RF_LINES.push({ off: L.key, p: L.p, pct: L.p + "%", tip: L.p + "%" + (L.name ? " " + L.name : ""),
+                      color: L.color, dash: L.dash, w: L.w, def: L.def });
+    }
+  })();
+  var RF_BY_KEY = {};
+  (function () { for (var i = 0; i < RF_LINES.length; i++) RF_BY_KEY[RF_LINES[i].off] = RF_LINES[i]; })();
+  // The filled zones between ladder lines, cool to hot (spec 6.3). Unlike the
+  // power-law pairs they do not depend on which lines are toggled on: they are the
+  // model's zones, and the Band fill toggle switches them as a set.
+  var RF_FILLS = [
+    { lo: "r01", hi: "r15", fill: "rgba(96,165,250,0.17)" },
+    { lo: "r15", hi: "r50", fill: "rgba(45,212,191,0.13)" },
+    { lo: "r50", hi: "r75", fill: "rgba(245,213,71,0.12)" },
+    { lo: "r75", hi: "r95", fill: "rgba(255,159,67,0.14)" },
+    { lo: "r95", hi: "r999", fill: "rgba(255,92,122,0.16)" }
+  ];
+
   // ---- math helpers -------------------------------------------------------
   function log10(x) { return Math.log(x) / LN10; }
   // continuous days-since-genesis (clamped to >=1 so log10(t) is defined)
@@ -138,6 +168,16 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   var prefs = { xMode: "date", yMode: "log", bandFill: false, halvings: true, oscillator: true, preset: "full",
                 bands: { p0001: false, p005: false, p025: true, p10: false, p165: true, p25: false, p50: false,
                          p75: false, p835: true, p90: false, p975: true, p995: false, p9999: false } };
+  // Refraction mode (v0.2.0). rf = validated fit (RF.readFit), hm = date -> height
+  // map (RF.heightMap); the mode is honoured only while both exist, so a missing
+  // block or missing heights silently leaves the power-law drawing in place.
+  // Refraction line visibility and its fill toggle are separate prefs (spec 6.3).
+  var rf = null, hm = null;
+  var rfNowRef = null;       // { h, ms, live }: the page's current height (U9 height rule)
+  var mode = "powerLaw";
+  prefs.rfLines = {};
+  (function () { for (var i = 0; i < RF_LINES.length; i++) prefs.rfLines[RF_LINES[i].off] = RF_LINES[i].def; })();
+  prefs.rfBandFill = true;
   var fullMin = Date.UTC(2010, 6, 18), fullMax = Date.UTC(2045, 11, 31);
   var view = { min: fullMin, max: fullMax };   // visible time window (ms)
   var todayMs = utcMidnight(Date.now());
@@ -156,6 +196,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   // rectangle. null when idle.
   var drag = null;
   var rafPending = false;
+  var oscLabelYs = null;     // gutter-label y positions already used this frame (Refraction osc)
 
   function utcMidnight(ms) {
     var d = new Date(ms);
@@ -326,6 +367,229 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   }
 
   // =========================================================================
+  //  ACTIVE MODEL — the one indirection between "which model" and the drawing
+  // =========================================================================
+  // Every drawing path (lines, fills, autoscale, oscillator, tooltip, crosshair,
+  // caution note) asks am() for the lines, their per-x values and the reference
+  // line ("centre": the power-law Trend, or the Refraction 50% fair value). The
+  // power-law adapter is a thin wrapper over the v0.1.8 functions above, so that
+  // mode draws exactly what it always drew.
+  function rfOn() { return !!(mode === "refraction" && rf && hm && model); }
+
+  // Refraction line price at a timestamp; NaN where the model has no height.
+  // Column cache (v0.2.0 review U5). A Refraction value depends on the date only
+  // through the UTC day's height, so every column of a frame — the lines, both
+  // edges of every zone, autoscale, the oscillator and the tooltip — shares one
+  // record per DAY: its height, anchor and decay computed once, and each line's
+  // price memoised on it. Indexed by the integer day (an array, not timestamps as
+  // object keys — that string conversion was the real cost), it stays valid across
+  // frames until the fit, the heights or "now" change (rfResetCache). The
+  // arithmetic is exactly RF.linePriceAt's, so drawing is bit-identical to
+  // evaluating every value afresh (pinned by a test through _columnCache(false)).
+  var rfDays = [];            // day index (from the height map's start) -> column record
+  var rfOffs = {};            // line key -> grid offset, fixed per fit
+  var rfCacheOn = true;       // test hook: _columnCache(false) evaluates afresh
+  var NO_COL = { ok: false, info: null };
+  function rfCol(ms) {
+    if (!hm) return NO_COL;
+    var d = Math.floor((ms - hm.start) / DAY);
+    if (!(d >= 0)) return NO_COL;
+    var c = rfCacheOn ? rfDays[d] : undefined;
+    if (c) return c;
+    var hi = RF.heightInfo(hm, hm.start + d * DAY, rfNowRef);
+    var h = hi ? hi.h : NaN;
+    if (!(h > 0) || !isFinite(h)) c = { ok: false, info: hi };
+    else c = { ok: true, info: hi, la: RF.anchorLogAt(rf, h), s: RF.decayAt(rf.c, rf.alpha, h), v: {} };
+    if (rfCacheOn) rfDays[d] = c;
+    return c;
+  }
+  function rfValueAt(ms, key) {
+    var l = RF_BY_KEY[key];
+    if (!l) return NaN;
+    var c = rfCol(ms);
+    if (!c.ok) return NaN;
+    var v = c.v[key];
+    if (v !== undefined) return v;
+    var off = rfOffs[key];
+    v = Math.pow(10, l.p > 5 ? c.la + off * c.s : c.la + off);
+    c.v[key] = v;
+    return v;
+  }
+  function rfResetCache() {
+    rfDays = [];
+    rfOffs = {};
+    if (rf) for (var i = 0; i < RF_LINES.length; i++) rfOffs[RF_LINES[i].off] = RF.offsetAt(rf, RF_LINES[i].p);
+  }
+  function rfVisible(key) { return !!RF_BY_KEY[key] && prefs.rfLines[key] === true; }
+
+  var PL_MODEL = {
+    lines: BAND_LINES,
+    visible: offVisible,
+    valueAt: bandValueAt,
+    centerAt: trendAt,
+    drawCenter: true,
+    fillOn: function () { return prefs.bandFill; },
+    // visible symmetric pairs only, outermost first (the v0.1.8 rule)
+    fills: function () {
+      var out = [];
+      for (var i = 0; i < FILL_PAIRS.length; i++) {
+        var fp = FILL_PAIRS[i];
+        if (offVisible(fp.lo) && offVisible(fp.hi)) out.push(fp);
+      }
+      return out;
+    },
+    // y-envelope sampler for autoscaleY: a constant offset pair in the parallel
+    // modes, the outer ladder lines sampled per x when the bands are separately sloped
+    envelope: function () {
+      var ok = qrOn() ? outerKeys() : null;
+      var ob = (ok && ok.lo) ? null : outerOffsets();
+      return function (ms) {
+        return [ob ? bandAt(ms, ob.lo) : bandValueAt(ms, ok.lo), ob ? bandAt(ms, ob.hi) : bandValueAt(ms, ok.hi)];
+      };
+    },
+    oscRange: function () {
+      var lo = 0.3, hi = 3;
+      if (qrOn()) {
+        var ok = outerKeys();
+        if (ok.lo) {
+          var qLo = Infinity, qHi = -Infinity, N = 60, k, msq, rLo, rHi;
+          for (k = 0; k <= N; k++) {
+            msq = view.min + (view.max - view.min) * (k / N);
+            rLo = bandValueAt(msq, ok.lo) / trendAt(msq);
+            rHi = bandValueAt(msq, ok.hi) / trendAt(msq);
+            if (rLo > 0 && rLo < qLo) qLo = rLo;
+            if (rHi > qHi) qHi = rHi;
+          }
+          if (isFinite(qLo) && isFinite(qHi) && qLo > 0) { lo = qLo; hi = qHi; }
+        }
+      } else {
+        var ob = outerOffsets();
+        if (!(ob.lo === 0 && ob.hi === 0)) { lo = Math.pow(10, ob.lo); hi = Math.pow(10, ob.hi); }
+      }
+      return { lo: lo, hi: hi };
+    },
+    // flat guides with parallel offsets, per-x curves for separately-sloped lines
+    oscGuides: function (ctx) {
+      for (var pi = 0; pi < BAND_LINES.length; pi++) {
+        var bl = BAND_LINES[pi];
+        if (!offVisible(bl.off)) continue;
+        if (qrOn()) oscCurve(ctx, bl);
+        else oscGuide(ctx, Math.pow(10, model.off[bl.off]), bl.color, bl.dash);
+      }
+    },
+    tipRows: function (ms, pricePt) {
+      var tl = trendLogAt(ms), trend = Math.pow(10, tl);
+      var rows = [];
+      rows.push(row("Date", fmtDate(ms) + "  (t=" + dayIndex(ms) + ")", C.axis));
+      if (pricePt) {
+        var dev = (pricePt.v / trend - 1) * 100;
+        var q = qrOn() ? quantileFromLinesAt(ms, pricePt.v) : residualQuantile(log10(pricePt.v) - tl);
+        rows.push(row("Price", fmtUSD(pricePt.v) + (pricePt.flag === 1 ? " (prov.)" : ""), C.price));
+        rows.push(row("Deviation", (dev >= 0 ? "+" : "") + dev.toFixed(1) + "%", dev >= 0 ? C.outer : C.inner));
+        if (isFinite(q)) rows.push(row("Quantile", q.toFixed(1) + "%", C.axis));
+      }
+      // Every visible percentile line plus the Trend, merged and sorted by dollar
+      // value descending. Each row is labelled by its percentile ("97.5%") or
+      // "Trend" — no hi/lo wording (individual labelled lines since v0.1.2).
+      var items = [], vi;
+      for (vi = 0; vi < BAND_LINES.length; vi++) {
+        var bl = BAND_LINES[vi];
+        if (!offVisible(bl.off)) continue;
+        items.push({ label: bl.pct, val: bandValueAt(ms, bl.off), color: bl.color });
+      }
+      items.push({ label: "Trend", val: trend, color: C.trend });
+      items.sort(function (a, b) { return b.val - a.val; });
+      for (vi = 0; vi < items.length; vi++) rows.push(row(items[vi].label, fmtUSD(items[vi].val), items[vi].color));
+      return rows;
+    },
+    cautionText: function () { return ["beyond stated model validity (~" + model.caution + ")"]; }
+  };
+
+  var RF_MODEL = {
+    lines: RF_LINES,
+    visible: rfVisible,
+    valueAt: rfValueAt,
+    colOk: function (ms) { return rfCol(ms).ok; },
+    centerAt: function (ms) { return rfValueAt(ms, "r50"); },
+    drawCenter: false,   // the fair value is the (toggleable) 50% line itself
+    fillOn: function () { return prefs.rfBandFill; },
+    fills: function () { return RF_FILLS; },
+    // The ladder is ordered at every height (d_q and z_q both rise with q, S > 0),
+    // so the lowest and highest visible lines bound every visible line everywhere;
+    // with the fill on, the outer zone edges (0.1% / 99.9%) are framed too.
+    envelope: function () {
+      var lo = null, hi = null, i;
+      for (i = RF_LINES.length - 1; i >= 0; i--) {
+        var k = RF_LINES[i].off;
+        if (!rfVisible(k)) continue;
+        if (lo === null) lo = k;
+        hi = k;
+      }
+      if (prefs.rfBandFill || lo === null) { lo = "r01"; hi = "r999"; }
+      return function (ms) { return [rfValueAt(ms, lo), rfValueAt(ms, hi)]; };
+    },
+    // the guide ratios move with height, so sample the visible outer curves
+    oscRange: function () {
+      var lo = 0.3, hi = 3, qLo = Infinity, qHi = -Infinity, N = 60, k, i, msq, c, r;
+      for (k = 0; k <= N; k++) {
+        msq = view.min + (view.max - view.min) * (k / N);
+        c = rfValueAt(msq, "r50");
+        if (!(c > 0)) continue;
+        for (i = 0; i < RF_LINES.length; i++) {
+          if (!rfVisible(RF_LINES[i].off)) continue;
+          r = rfValueAt(msq, RF_LINES[i].off) / c;
+          if (r > 0 && r < qLo) qLo = r;
+          if (r > qHi) qHi = r;
+        }
+      }
+      if (isFinite(qLo) && isFinite(qHi) && qLo > 0) { lo = Math.min(lo, qLo); hi = Math.max(hi, qHi); }
+      return { lo: lo, hi: hi };
+    },
+    oscGuides: function (ctx) {
+      // gutter labels of curves that start close together would overprint; keep
+      // the first (top-down) and skip any within 10px of one already drawn
+      oscLabelYs = [oscToPx(1)];
+      for (var pi = 0; pi < RF_LINES.length; pi++) {
+        var bl = RF_LINES[pi];
+        if (bl.off === "r50" || !rfVisible(bl.off)) continue;   // 50% is the 1.0x guide itself
+        oscCurve(ctx, bl);
+      }
+    },
+    tipRows: function (ms, pricePt) {
+      var rows = [], hi = rfCol(ms).info;
+      var fair = rfValueAt(ms, "r50");
+      rows.push(row("Date", fmtDate(ms), C.axis));
+      rows.push(row("Block height", hi ? (Math.round(hi.h).toLocaleString("en-US") + (hi.est ? " (est.)" : "")) : "—", C.axis));
+      if (pricePt) {
+        rows.push(row("Price", fmtUSD(pricePt.v) + (pricePt.flag === 1 ? " (prov.)" : ""), C.price));
+        if (fair > 0) {
+          var dev = (pricePt.v / fair - 1) * 100;
+          rows.push(row("Deviation", (dev >= 0 ? "+" : "") + dev.toFixed(1) + "%", dev >= 0 ? C.outer : C.inner));
+        }
+        var q = hi ? RF.percentileOf(rf, hi.h, pricePt.v) : NaN;
+        // grid inverse: an approximation of the server's exact percentile (U7)
+        if (isFinite(q)) rows.push(row("Percentile", "≈" + q.toFixed(1) + "%", C.axis));
+      }
+      var items = [], vi;
+      for (vi = 0; vi < RF_LINES.length; vi++) {
+        var bl = RF_LINES[vi];
+        if (!rfVisible(bl.off)) continue;
+        var v = rfValueAt(ms, bl.off);
+        if (isFinite(v)) items.push({ label: bl.tip, val: v, color: bl.color });
+      }
+      items.sort(function (a, b) { return b.val - a.val; });
+      for (vi = 0; vi < items.length; vi++) rows.push(row(items[vi].label, fmtUSD(items[vi].val), items[vi].color));
+      return rows;
+    },
+    // Same hatched region, different words (U4): the author publishes five-year
+    // projections; everything right of "today" is the fitted model extended forward,
+    // and the hatch marks the far range, well beyond anything he has published.
+    cautionText: function () { return ["far range: well beyond", "the author's five-year", "projections"]; }
+  };
+
+  function am() { return rfOn() ? RF_MODEL : PL_MODEL; }
+
+  // =========================================================================
   //  AUTOSCALE — choose the price y-domain that fits the current view
   // =========================================================================
   // Sample the outer offset envelope plus any visible price points across the
@@ -333,15 +597,14 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function autoscaleY() {
     if (!model) { yDom = { min: 1, max: 1e6 }; return; }
     var lo = Infinity, hi = -Infinity, i;
-    // Envelope: a constant offset pair in the parallel modes, the outer ladder
-    // lines sampled per x when the bands are separately-sloped.
-    var ok = qrOn() ? outerKeys() : null;
-    var ob = (ok && ok.lo) ? null : outerOffsets();
+    // Envelope of the active model's visible lines, sampled across the view
+    // (see the adapters' envelope()).
+    var env = am().envelope();
     var N = 100;
     for (i = 0; i <= N; i++) {
       var ms = view.min + (view.max - view.min) * (i / N);
-      var low = ob ? bandAt(ms, ob.lo) : bandValueAt(ms, ok.lo);
-      var high = ob ? bandAt(ms, ob.hi) : bandValueAt(ms, ok.hi);
+      var lh = env(ms);
+      var low = lh[0], high = lh[1];
       if (low < lo) lo = low;
       if (high > hi) hi = high;
     }
@@ -365,29 +628,12 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   function autoscaleOsc() {
     // ratio domain wide enough for the visible line multipliers and the data
     var lo = 0.3, hi = 3;
-    if (model && qrOn()) {
-      // separately-sloped lines: the guide ratios move with x, so sample the two
-      // outer ladder curves across the view instead of reading a flat multiplier
-      var ok = outerKeys();
-      if (ok.lo) {
-        var qLo = Infinity, qHi = -Infinity, N = 60, k, msq, rLo, rHi;
-        for (k = 0; k <= N; k++) {
-          msq = view.min + (view.max - view.min) * (k / N);
-          rLo = bandValueAt(msq, ok.lo) / trendAt(msq);
-          rHi = bandValueAt(msq, ok.hi) / trendAt(msq);
-          if (rLo > 0 && rLo < qLo) qLo = rLo;
-          if (rHi > qHi) qHi = rHi;
-        }
-        if (isFinite(qLo) && isFinite(qHi) && qLo > 0) { lo = qLo; hi = qHi; }
-      }
-    } else if (model) {
-      var ob = outerOffsets();
-      if (!(ob.lo === 0 && ob.hi === 0)) { lo = Math.pow(10, ob.lo); hi = Math.pow(10, ob.hi); }
-    }
+    var A = am();
+    if (model) { var rg = A.oscRange(); lo = rg.lo; hi = rg.hi; }
     for (var i = 0; i < prices.length; i++) {
       var p = prices[i];
       if (p.t < view.min || p.t > view.max) continue;
-      var r = p.v / trendAt(p.t);
+      var r = p.v / A.centerAt(p.t);
       if (r > 0 && r < lo) lo = r;
       if (r > hi) hi = r;
     }
@@ -457,9 +703,9 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     ctx.beginPath();
     ctx.rect(G.ml, G.mt, G.mw, G.mh);
     ctx.clip();
-    if (prefs.bandFill) drawBandFills(ctx);
+    if (am().fillOn()) drawBandFills(ctx);
     drawBands(ctx);
-    drawTrend(ctx);
+    if (am().drawCenter) drawTrend(ctx);
     drawPrice(ctx);
     drawTodayLine(ctx);
     if (prefs.halvings) drawHalvings(ctx);
@@ -480,6 +726,16 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   }
 
   // ---- grid + y/x tick computation ----------------------------------------
+  // "Nice" step for the linear y-axis: 1, 2 or 5 x a power of ten (Heckbert).
+  // (v0.2.0: yTicks has called this since v0.1.x but it was never defined, so
+  // Y = Linear threw and stopped the frame; added here, used by both models.)
+  function niceNum(range, round) {
+    if (!(range > 0) || !isFinite(range)) return 1;
+    var exp = Math.floor(log10(range)), f = range / Math.pow(10, exp), nf;
+    if (round) nf = f < 1.5 ? 1 : (f < 3 ? 2 : (f < 7 ? 5 : 10));
+    else nf = f <= 1 ? 1 : (f <= 2 ? 2 : (f <= 5 ? 5 : 10));
+    return nf * Math.pow(10, exp);
+  }
   function yTicks() {
     var out = [];
     if (prefs.yMode === "linear") {
@@ -621,40 +877,57 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   // cannot evaluate (old fits) or toggled off via the legend are skipped cleanly.
   // The per-x value comes from bandFn(), so parallel offsets and separately-sloped
   // quantile-regression lines draw through the very same sampler.
+  // (v0.2.0) The same loop draws the active model's list: the Refraction lines
+  // carry their own width ("w"); the power-law percentiles keep the shared 1.4.
   function drawBands(ctx) {
+    var A = am();
     ctx.lineWidth = 1.4;
-    for (var i = 0; i < BAND_LINES.length; i++) {
-      var bl = BAND_LINES[i];
-      if (!offVisible(bl.off)) continue;
+    for (var i = 0; i < A.lines.length; i++) {
+      var bl = A.lines[i];
+      if (!A.visible(bl.off)) continue;
+      var w = bl.w || 1.4;
+      if (ctx.lineWidth !== w) ctx.lineWidth = w;
       ctx.setLineDash(bl.dash);
       ctx.strokeStyle = bl.color;
-      samplePath(ctx, bandFn(bl.off));
+      samplePath(ctx, lineFn(A, bl.off));
       ctx.stroke();
     }
     ctx.setLineDash([]);
   }
+  function lineFn(A, key) { return A === PL_MODEL ? bandFn(key) : function (ms) { return A.valueAt(ms, key); }; }
 
   // Optional translucent fills for the visible symmetric pairs (default off),
   // drawn outermost-first so inner pairs layer on top. A pair fills only when
   // BOTH of its lines are visible; the lone 50% median never fills.
   function drawBandFills(ctx) {
-    for (var i = 0; i < FILL_PAIRS.length; i++) {
-      var fp = FILL_PAIRS[i];
-      if (!offVisible(fp.lo) || !offVisible(fp.hi)) continue;
-      fillBetween(ctx, fp.lo, fp.hi, fp.fill);
-    }
+    var A = am(), list = A.fills();
+    for (var i = 0; i < list.length; i++) fillBetween(ctx, A, list[i].lo, list[i].hi, list[i].fill);
   }
-  // Fill between two ladder lines, sampled per x through the shared evaluator so a
-  // narrowing quantile-regression fan fills its true (non-parallel) shape.
-  function fillBetween(ctx, loKey, hiKey, color) {
-    var step = 2, px;
-    ctx.beginPath();
+  // Fill between two ladder lines, sampled per x through the active evaluator so a
+  // narrowing fan (quantile regression, or the Refraction lines bending onto the
+  // anchor) fills its true shape. The polygon spans only the x range where both
+  // edges are finite (a Refraction line has no value before the height series).
+  function fillBetween(ctx, A, loKey, hiKey, color) {
+    var step = 2, px, x0 = null, x1 = null, gap = false;
     for (px = G.ml; px <= G.ml + G.mw + 0.01; px += step) {
-      var y = yToPx(bandValueAt(pxToMs(px), hiKey));
-      if (px === G.ml) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+      var ms = pxToMs(px);
+      // a Refraction column is drawable exactly when it has a height (positive
+      // finite prices then map to finite pixels), so it needs no value evaluation
+      if (A.colOk ? A.colOk(ms) : (isFinite(yToPx(A.valueAt(ms, hiKey))) && isFinite(yToPx(A.valueAt(ms, loKey))))) {
+        if (x0 === null) x0 = px;
+        x1 = px;
+      } else { gap = true; if (x0 !== null) break; }
     }
-    for (px = G.ml + G.mw; px >= G.ml - 0.01; px -= step) {
-      ctx.lineTo(px, yToPx(bandValueAt(pxToMs(px), loKey)));
+    if (x0 === null) return;
+    // finite across the whole plot (always, in power-law mode): the v0.1.8 bounds
+    var xr = gap ? x1 : G.ml + G.mw;
+    ctx.beginPath();
+    for (px = x0; px <= x1 + 0.01; px += step) {
+      var y = yToPx(A.valueAt(pxToMs(px), hiKey));
+      if (px === x0) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+    }
+    for (px = xr; px >= x0 - 0.01; px -= step) {
+      ctx.lineTo(px, yToPx(A.valueAt(pxToMs(px), loKey)));
     }
     ctx.closePath();
     ctx.fillStyle = color;
@@ -752,7 +1025,16 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     ctx.fillStyle = "rgba(148,163,184,0.75)";
     ctx.font = "9px system-ui, sans-serif";
     ctx.textAlign = "left"; ctx.textBaseline = "top";
-    if (x0 < G.ml + G.mw - 60) ctx.fillText("beyond stated model validity (~" + model.caution + ")", x0 + 4, G.mt + 4);
+    if (x0 < G.ml + G.mw - 60) {
+      var lines = am().cautionText();
+      if (lines.length === 1) ctx.fillText(lines[0], x0 + 4, G.mt + 4);
+      else {
+        // multi-line (Refraction) caption sits at the foot of the hatch: the
+        // ladder converges high on the right, so the bottom is always clear
+        var top = G.mt + G.mh - 6 - lines.length * 11;
+        for (var li = 0; li < lines.length; li++) ctx.fillText(lines[li], x0 + 4, top + li * 11);
+      }
+    }
   }
 
   // ---- crosshair + shared tooltip -----------------------------------------
@@ -768,10 +1050,12 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     ctx.restore();
 
     var ms = pxToMs(x);
-    // a dot on the trend at the cursor
-    var ty = yToPx(trendAt(ms));
-    ctx.fillStyle = C.trend;
-    ctx.beginPath(); ctx.arc(x, ty, 3, 0, Math.PI * 2); ctx.fill();
+    // a dot on the reference line (Trend / fair value) at the cursor
+    var ty = yToPx(am().centerAt(ms));
+    if (isFinite(ty)) {
+      ctx.fillStyle = C.trend;
+      ctx.beginPath(); ctx.arc(x, ty, 3, 0, Math.PI * 2); ctx.fill();
+    }
     // nearest price point (snap within ~30px), for price/deviation/quantile
     var near = nearestPrice(ms);
     var pxPrice = null;
@@ -854,28 +1138,7 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   function updateTooltip(ms, pricePt, px) {
     if (!els.tip) return;
-    var tl = trendLogAt(ms), trend = Math.pow(10, tl);
-    var rows = [];
-    rows.push(row("Date", fmtDate(ms) + "  (t=" + dayIndex(ms) + ")", C.axis));
-    if (pricePt) {
-      var dev = (pricePt.v / trend - 1) * 100;
-      var q = qrOn() ? quantileFromLinesAt(ms, pricePt.v) : residualQuantile(log10(pricePt.v) - tl);
-      rows.push(row("Price", fmtUSD(pricePt.v) + (pricePt.flag === 1 ? " (prov.)" : ""), C.price));
-      rows.push(row("Deviation", (dev >= 0 ? "+" : "") + dev.toFixed(1) + "%", dev >= 0 ? C.outer : C.inner));
-      if (isFinite(q)) rows.push(row("Quantile", q.toFixed(1) + "%", C.axis));
-    }
-    // Every visible percentile line plus the Trend, merged and sorted by dollar
-    // value descending. Each row is labelled by its percentile ("97.5%") or
-    // "Trend" — no hi/lo wording (individual labelled lines since v0.1.2).
-    var items = [], vi;
-    for (vi = 0; vi < BAND_LINES.length; vi++) {
-      var bl = BAND_LINES[vi];
-      if (!offVisible(bl.off)) continue;
-      items.push({ label: bl.pct, val: bandValueAt(ms, bl.off), color: bl.color });
-    }
-    items.push({ label: "Trend", val: trend, color: C.trend });
-    items.sort(function (a, b) { return b.val - a.val; });
-    for (vi = 0; vi < items.length; vi++) rows.push(row(items[vi].label, fmtUSD(items[vi].val), items[vi].color));
+    var rows = am().tipRows(ms, pricePt);
 
     els.tip.innerHTML = rows.join("");
     els.tip.style.display = "block";
@@ -907,13 +1170,10 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     // offsets a percentile sits at a constant multiple (10^offset), so its guide is
     // a flat line; with separately-sloped quantile-regression lines the ratio moves
     // with x, so the guide becomes a per-x CURVE (rearranged band value / trend).
+    var A = am();
+    oscLabelYs = null;   // label collision list; the Refraction guides opt in
     oscGuide(ctx, 1, "rgba(236,236,236,0.4)", []);
-    for (var pi = 0; pi < BAND_LINES.length; pi++) {
-      var bl = BAND_LINES[pi];
-      if (!offVisible(bl.off)) continue;
-      if (qrOn()) oscCurve(ctx, bl);
-      else oscGuide(ctx, Math.pow(10, model.off[bl.off]), bl.color, bl.dash);
-    }
+    A.oscGuides(ctx);
     // ratio line, coloured green below 1 / red above 1
     ctx.save();
     ctx.beginPath(); ctx.rect(G.ml, G.ot, G.mw, G.oh); ctx.clip();
@@ -923,10 +1183,10 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
       var p = prices[i];
       if (p.t < view.min - DAY) { prev = p; continue; }
       if (p.t > view.max + DAY) break;
-      var r = p.v / trendAt(p.t);
+      var r = p.v / A.centerAt(p.t);
       var x = xToPx(p.t), y = oscToPx(r);
       if (prev) {
-        var pr = prev.v / trendAt(prev.t);
+        var pr = prev.v / A.centerAt(prev.t);
         var mid = (r + pr) / 2;
         ctx.strokeStyle = mid >= 1 ? C.oscDown : C.oscUp;
         ctx.beginPath(); ctx.moveTo(xToPx(prev.t), oscToPx(pr)); ctx.lineTo(x, y); ctx.stroke();
@@ -963,18 +1223,23 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     ctx.beginPath(); ctx.rect(G.ml, G.ot, G.mw, G.oh); ctx.clip();
     ctx.setLineDash(bl.dash); ctx.strokeStyle = bl.color; ctx.lineWidth = 1;
     ctx.beginPath();
+    var A = am();
     for (px = G.ml; px <= G.ml + G.mw + 0.01; px += step) {
       ms = pxToMs(px);
-      y = oscToPx(bandValueAt(ms, bl.off) / trendAt(ms));
+      y = oscToPx(A.valueAt(ms, bl.off) / A.centerAt(ms));
       if (!isFinite(y)) { started = false; continue; }
       if (!started) { ctx.moveTo(px, y); started = true; } else { ctx.lineTo(px, y); }
     }
     ctx.stroke();
     ctx.restore();
     var msL = pxToMs(G.ml);
-    var r0 = bandValueAt(msL, bl.off) / trendAt(msL);
+    var r0 = A.valueAt(msL, bl.off) / A.centerAt(msL);
     var ly = oscToPx(r0);
     if (!isFinite(ly) || ly < G.ot || ly > G.ot + G.oh) return;
+    if (oscLabelYs) {
+      for (var li = 0; li < oscLabelYs.length; li++) if (Math.abs(oscLabelYs[li] - ly) < 10) return;
+      oscLabelYs.push(ly);
+    }
     ctx.fillStyle = bl.color; ctx.font = "9px ui-monospace, monospace";
     ctx.textAlign = "right"; ctx.textBaseline = "middle";
     ctx.fillText(trimNum(r0) + "x", G.ml - 6, ly);
@@ -1183,6 +1448,10 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
   }
 
   function setModel(m) {
+    // The Refraction fit rides on the same payload (v0.2.0); a missing or damaged
+    // block leaves rf null, which keeps the chart in power-law mode.
+    rf = m ? RF.readFit(m.refraction) : null;
+    rfResetCache();
     if (!m) { model = null; scheduleDraw(); return; }
     var off = m.bandOffsets || {};
     // Carry all thirteen offsets; the newer keys may be undefined on old fits and
@@ -1233,12 +1502,12 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     var presetChanged = next.preset !== undefined && next.preset !== prefs.preset;
     for (var k in next) {
       if (!Object.prototype.hasOwnProperty.call(next, k)) continue;
-      if (k === "bands" && next.bands && typeof next.bands === "object") {
+      if ((k === "bands" || k === "rfLines") && next[k] && typeof next[k] === "object") {
         // merge onto the existing per-line visibility map rather than replacing it
-        var nb = {};
-        for (var bk in prefs.bands) { if (Object.prototype.hasOwnProperty.call(prefs.bands, bk)) nb[bk] = prefs.bands[bk]; }
-        for (var bk2 in next.bands) { if (Object.prototype.hasOwnProperty.call(next.bands, bk2)) nb[bk2] = next.bands[bk2]; }
-        prefs.bands = nb;
+        var nb = {}, cur = prefs[k] || {};
+        for (var bk in cur) { if (Object.prototype.hasOwnProperty.call(cur, bk)) nb[bk] = cur[bk]; }
+        for (var bk2 in next[k]) { if (Object.prototype.hasOwnProperty.call(next[k], bk2)) nb[bk2] = next[k][bk2]; }
+        prefs[k] = nb;
       } else {
         prefs[k] = next[k];
       }
@@ -1271,6 +1540,31 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
 
   function resize() { scheduleDraw(); }
 
+  // /api/heights payload (dense daily array) for the Refraction date -> height map.
+  function setHeights(api) { hm = RF.heightMap(api); rfResetCache(); scheduleDraw(); }
+  // The current height and the time it describes ({ h, ms, live } or null): later
+  // days are projected from it at 144 blocks/day (the page's one height rule). The
+  // column cache is dropped only when the day or the height actually changes.
+  function setNow(n) {
+    var next = (n && n.h > 0 && isFinite(n.h) && isFinite(n.ms)) ? { h: n.h, ms: n.ms, live: n.live === true } : null;
+    var same = next && rfNowRef && next.h === rfNowRef.h && next.live === rfNowRef.live &&
+      Math.floor(next.ms / DAY) === Math.floor(rfNowRef.ms / DAY);
+    if (same || (!next && !rfNowRef)) return;
+    rfNowRef = next;
+    rfResetCache();
+    scheduleDraw();
+  }
+  // "powerLaw" | "refraction". Honoured only while the fit and the heights exist
+  // (rfOn()); otherwise the power-law drawing stays in place.
+  function setMode(name) {
+    mode = name === "refraction" ? "refraction" : "powerLaw";
+    hover = null; hideTooltip();
+    scheduleDraw();
+  }
+  // Test hook (U5): evaluate every Refraction value afresh instead of through the
+  // per-frame column cache, so a test can prove the cache changes no draw call.
+  function columnCache(on) { rfCacheOn = on !== false; rfResetCache(); scheduleDraw(); }
+
   window.PLChart = {
     mount: mount,
     setModel: setModel,
@@ -1280,6 +1574,10 @@ export const CHART_JS: string = String.raw`/* PLCHART_ENGINE */
     setPreset: setPreset,
     resize: resize,
     redraw: scheduleDraw,
+    setHeights: setHeights,
+    setNow: setNow,
+    setMode: setMode,
+    _columnCache: columnCache,
     fmtUSD: fmtUSD
   };
 })();
