@@ -531,6 +531,21 @@ Then open `http://localhost:3013`. Runtime npm dependencies are intentionally ze
    package fails every install with a generic "manifest unknown" error. This is a one-time step per
    package; subsequent version pushes to the same package name stay public.
 
+### Releasing without pushing a tag yourself (workflow-dispatch pipeline)
+
+For environments that cannot push tags, `.github/workflows/release.yml` creates the tag and the GitHub
+Release. The image must exist on GHCR before `main` moves, because Umbrel reads the compose pin straight
+from `main`.
+
+1. Make one release commit on a branch with the lockstep bumps (`package.json`, `package-lock.json`,
+   `umbrel-app.yml`, the `docker-compose.yml` pin) and the release notes.
+2. Run the **Docker** workflow manually on that branch with `version` (e.g. `0.2.0`) to publish the image.
+3. Open a pull request and wait for its checks and for the image to exist on GHCR.
+4. Squash-merge the pull request.
+5. Run the **Release** workflow on `main` with `version`, `sha` (the merge commit), `name` (release
+   title) and `notes` (release body). It refuses to tag a commit that is not on `main`, a version whose
+   manifest and compose pin disagree, or a version whose multi-arch image is not on GHCR.
+
 ## License
 
 [MIT](LICENSE)

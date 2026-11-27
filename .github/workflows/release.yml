@@ -1,0 +1,203 @@
+# Create the git tag and the GitHub Release for an already-published image.
+#
+# Why this exists: tags and Releases are made by GitHub Actions instead of a
+# local `git tag` + `git push origin vX.Y.Z`, so a release also works from
+# environments that cannot push tags or call `gh` directly.
+#
+# Order of a release (the image must exist before `main` moves, because Umbrel
+# reads the docker-compose.yml pin straight from `main`):
+#
+#   1. Run the Docker workflow manually (workflow_dispatch, `version` input) on
+#      the release branch. That publishes ghcr.io/<owner>/umbrel-btc-powerlaw-model.
+#   2. Open a pull request and wait for its checks and for the image to exist.
+#   3. Squash-merge the pull request.
+#   4. Run THIS workflow on `main` with `version`, `sha` (the merge commit),
+#      `name` (release title) and `notes` (release body, markdown).
+#
+# It refuses to tag a commit that is not on `main`, a version whose manifest
+# and compose pin disagree, or a version whose multi-arch image is not on GHCR.
+#
+# Note: a tag created with the workflow token does not trigger other workflows,
+# so the Docker workflow's `v*` tag build does NOT run and the image is not
+# rebuilt - the one published in step 1 is the one that ships.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Bare semver of the release (e.g. 0.2.0), no leading v'
+        required: true
+        type: string
+      sha:
+        description: 'Full 40-character commit SHA to tag (the squash-merge commit on main)'
+        required: true
+        type: string
+      name:
+        description: 'Release title'
+        required: true
+        type: string
+      notes:
+        description: 'Release body (markdown). Empty = auto-generated notes'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Validate inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be bare semver like 0.2.0 (no leading v), got '$VERSION'"
+            exit 1
+          fi
+
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be a full 40-character lowercase commit SHA, got '$SHA'"
+            exit 1
+          fi
+
+          if [[ "$(git rev-parse HEAD)" != "$SHA" ]]; then
+            echo "::error::checked-out HEAD $(git rev-parse HEAD) does not equal sha $SHA"
+            exit 1
+          fi
+
+          # The tag must point at a commit that is actually on main.
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not contained in origin/main - merge the pull request first and pass the merge commit's SHA"
+            exit 1
+          fi
+
+          if [[ -n "$(git ls-remote --tags origin "refs/tags/v$VERSION")" ]]; then
+            echo "::error::tag v$VERSION already exists on the remote"
+            exit 1
+          fi
+
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::a GitHub Release for v$VERSION already exists"
+            exit 1
+          fi
+
+          echo "Inputs OK: v$VERSION at $SHA"
+
+      - name: Verify version lockstep
+        # umbrel-app.yml's version:, the image tag pinned in docker-compose.yml
+        # and the version being released must agree at the commit being tagged.
+        env:
+          SOURCE_VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          MANIFEST_VER=$(grep -E '^version:' hmlebtc-powerlaw-model/umbrel-app.yml \
+                | head -1 \
+                | sed -E 's/^version:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/')
+
+          COMPOSE_VER=$(grep -E '^\s*image:\s*ghcr\.io/' hmlebtc-powerlaw-model/docker-compose.yml \
+                | head -1 \
+                | sed -E 's/.*:([0-9][0-9A-Za-z.+_-]*)[[:space:]]*$/\1/')
+
+          echo "umbrel-app.yml version:       $MANIFEST_VER"
+          echo "docker-compose.yml image pin: $COMPOSE_VER"
+          echo "release source version:       $SOURCE_VER"
+
+          if [[ -z "$MANIFEST_VER" || -z "$COMPOSE_VER" || -z "$SOURCE_VER" ]]; then
+            echo "::error::could not determine one or more versions (manifest='$MANIFEST_VER' compose='$COMPOSE_VER' source='$SOURCE_VER')"
+            exit 1
+          fi
+
+          if [[ "$MANIFEST_VER" != "$COMPOSE_VER" || "$MANIFEST_VER" != "$SOURCE_VER" ]]; then
+            echo "::error::version lockstep broken - umbrel-app.yml=$MANIFEST_VER docker-compose.yml=$COMPOSE_VER release=$SOURCE_VER (all three must match exactly)"
+            exit 1
+          fi
+
+          echo "Version lockstep OK: $MANIFEST_VER"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the image is on GHCR
+        # No tag or release for a version whose image is not published yet.
+        env:
+          VERSION: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="ghcr.io/${OWNER,,}/umbrel-btc-powerlaw-model:$VERSION"
+
+          if ! OUT=$(docker buildx imagetools inspect "$IMAGE"); then
+            echo "::error::image $IMAGE not found on GHCR - run the Docker workflow manually with version=$VERSION first"
+            exit 1
+          fi
+          echo "$OUT"
+
+          for PLATFORM in linux/amd64 linux/arm64; do
+            if ! grep -q "$PLATFORM" <<< "$OUT"; then
+              echo "::error::image $IMAGE does not list $PLATFORM"
+              exit 1
+            fi
+          done
+
+          echo "Image OK: $IMAGE (linux/amd64 + linux/arm64)"
+
+      - name: Create tag and GitHub Release
+        # `gh release create --target <sha>` creates a lightweight tag at
+        # exactly that commit, matching the repo's existing tags.
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          NAME: ${{ inputs.name }}
+          NOTES: ${{ inputs.notes }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$NOTES" ]]; then
+            gh release create "v$VERSION" --target "$SHA" --title "$NAME" --notes "$NOTES"
+          else
+            gh release create "v$VERSION" --target "$SHA" --title "$NAME" --generate-notes
+          fi
+
+      - name: Summary
+        if: success()
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          {
+            echo "## Release"
+            echo ""
+            echo "Tag: \`v$VERSION\`  "
+            echo "Commit: \`$SHA\`  "
+            echo "Release: $SERVER/$REPO/releases/tag/v$VERSION  "
+            echo "Image: \`ghcr.io/${OWNER,,}/umbrel-btc-powerlaw-model:$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
