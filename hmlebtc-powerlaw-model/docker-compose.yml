@@ -4,11 +4,13 @@
 #   login in front of the dashboard, which has no auth of its own).
 # - `web` is the daemon + dashboard, pulled from GHCR. It listens on 3013
 #   and keeps its persisted state (settings.json, canonical price history,
-#   model fit history, activity log, job stats) under /data, bind-mounted
+#   block-height history in heights.json, model fit history, activity log,
+#   job stats) under /data, bind-mounted
 #   to Umbrel's per-app persistent storage.
 #
 # No privileged access, no host pid/network namespace, no docker.sock -
-# this app only talks to public price APIs over the network and serves
+# this app only talks to public price and block-height APIs over the
+# network (it uses no API keys and never touches a local Bitcoin node) and serves
 # its own dashboard; app_proxy is the only thing standing between it and
 # the internet-facing side of Umbrel.
 #
@@ -37,7 +39,7 @@ services:
   web:
     # Pin the exact released version - never `:latest`, never `v`-prefixed.
     # Bump in lockstep with umbrel-app.yml `version:` on every release.
-    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.1.8
+    image: ghcr.io/hmlebtc/umbrel-btc-powerlaw-model:0.2.0
     restart: on-failure
     stop_grace_period: 30s
     volumes:
@@ -50,4 +52,7 @@ services:
       BPL_PROJECTION_END_YEAR: "2045"
       # Allowed: pointInTime (default) | fullSample | quantileRegression
       BPL_BAND_MODE: pointInTime
+      # Model shown on the dashboard: powerLaw (default) | refraction. Both are always fitted;
+      # this only picks which one is displayed.
+      BPL_MODEL: powerLaw
       BPL_SOURCE_MODE: auto

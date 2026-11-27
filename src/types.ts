@@ -6,6 +6,8 @@
  * every A/n/sigma value is computed at fit time.
  */
 
+import type { RefractionFit } from './refraction.js';
+
 // ---------------------------------------------------------------------------
 // Core observations & price store (spec section 3)
 // ---------------------------------------------------------------------------
@@ -35,10 +37,94 @@ export interface PriceStoreFile {
 }
 
 // ---------------------------------------------------------------------------
+// Block-height store (v0.2.0 spec section 3) — /data/heights.json.
+// ---------------------------------------------------------------------------
+
+/**
+ * One day's block height: `h` = TRUE chain height of the last block of UTC day
+ * `date` (Coin Metrics' cumulative count minus the calibrated offset). `usd` is the
+ * Coin Metrics `PriceUSD` close of that day when the day came from Coin Metrics with
+ * a price.
+ */
+export interface HeightObservation {
+  /** UTC calendar date, `YYYY-MM-DD`. */
+  date: string;
+  h: number;
+  usd?: number;
+}
+
+/** A completed close paired with its true height: one row of the Refraction fit sample. */
+export interface HeightClose {
+  date: string;
+  usd: number;
+  h: number;
+}
+
+/** One day's raw (non-cumulative) block count as served by Coin Metrics `BlkCnt`. */
+export interface BlockCountObservation {
+  date: string;
+  count: number;
+  /** Coin Metrics `PriceUSD` close for the day; absent before 2010-07-18 or when not yet published. */
+  usd?: number;
+}
+
+/** A difficulty-adjustment epoch boundary: block `height` was timestamped at `time` (unix seconds). */
+export interface HeightEpoch {
+  time: number;
+  height: number;
+}
+
+/** One day's canonical record in `/data/heights.json`. */
+export interface HeightRecord {
+  h: number;
+  /** Coin Metrics `PriceUSD` close; only on days written from Coin Metrics that carried a price. */
+  usd?: number;
+  /** `coinmetrics` (authoritative) | `seed` (bundled snapshot) | `tip` (derived from the live tip). */
+  src: string;
+  /** `interpolated` (replaced when the primary catches up) | `divergent` (epoch cross-check >50 blocks). */
+  flags?: string[];
+}
+
+/** Latest chain tip seen by the height pipeline. */
+export interface HeightTip {
+  height: number;
+  /** ISO timestamp the tip was observed. */
+  at: string;
+}
+
+/** On-disk shape of `/data/heights.json` (`tip` is an additive optional field). */
+export interface HeightStoreFile {
+  version: 1;
+  updatedAt: string;
+  days: Record<string, HeightRecord>;
+  tip?: HeightTip;
+  /**
+   * Calibrated `cumulative count - chain height` the `coinmetrics` days are stored
+   * on. Absent in files written before v0.2.0's true-height basis: those days are
+   * raw cumulative counts (offset 0) and are rebased on the next reconcile.
+   */
+  offset?: number;
+  /** ms of the last successful full Coin Metrics load (drives the weekly integrity pass). */
+  fullLoadAt?: number;
+  /** Diagnostic offsets already announced (one activity event per distinct value). */
+  offsetNoticed?: number[];
+}
+
+/** GET /api/heights payload: a dense daily array; index i is date `start` + i days. */
+export interface ApiHeights {
+  start: string;
+  end: string;
+  count: number;
+  heights: number[];
+  tip: HeightTip | null;
+}
+
+// ---------------------------------------------------------------------------
 // Sources (spec section 3.2) — per-source health tracked in memory.
 // ---------------------------------------------------------------------------
 
-export type SourceKind = 'history' | 'spot';
+/** `height` = block-height capabilities (daily block counts, difficulty epochs, chain tip). */
+export type SourceKind = 'history' | 'spot' | 'height';
 
 export interface SourceHealth {
   lastOkAt: string | null;
@@ -53,6 +139,14 @@ export interface SourceStatus extends SourceHealth {
   name: string;
   kinds: SourceKind[];
   enabled: boolean;
+  /**
+   * Health of the block-height calls (counts, epochs, tip, lookup), tracked apart
+   * from price health so a working tip endpoint can never mask a failing history or
+   * spot endpoint. Present only on sources that have BOTH price and height
+   * capabilities; for height-only sources (coinmetrics, blockstream) the main fields
+   * above ARE the height health.
+   */
+  heightHealth?: SourceHealth;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +307,24 @@ export interface FitRecord {
   includesProvisionalSpot: boolean;
   /** Wall-clock milliseconds the fit's owning job took. */
   durationMs: number;
+  /**
+   * Refraction model fit taken in the same job (v0.2.0). Absent on records written
+   * before it, when no heights were available, or when the fit failed — consumers
+   * must guard on presence.
+   */
+  refraction?: RefractionRecord;
+}
+
+/** Which daily-close series a Refraction fit was made on (spec 2.4 price-series rule). */
+export type PriceSeriesKind = 'coinmetrics' | 'canonical';
+
+/** The engine's fit plus the provenance needed to evaluate and explain it later. */
+export interface RefractionRecord extends RefractionFit {
+  priceSeries: PriceSeriesKind;
+  /** Fingerprint of the closes the fit saw (count, sum of h, sum of usd); lets the exact percentile detect a different sample. */
+  sampleChecksum?: { n: number; sumH: number; sumUsd: number };
+  /** Wall-clock milliseconds `fitRefraction` itself took. */
+  fitMs: number;
 }
 
 export interface ModelStoreFile {
@@ -266,6 +378,9 @@ export interface Job {
 
 export type SourceMode = 'auto' | 'manual';
 
+/** Which model the dashboard's chart/readouts show (both are always fitted). */
+export type ModelKind = 'powerLaw' | 'refraction';
+
 export interface EnabledSources {
   blockchainInfo: boolean;
   bitstamp: boolean;
@@ -274,6 +389,9 @@ export interface EnabledSources {
   coinbase: boolean;
   mempoolSpace: boolean;
   coingecko: boolean;
+  /** Block-height sources (v0.2.0). Absent in older settings.json files => default true. */
+  coinmetrics: boolean;
+  blockstream: boolean;
 }
 
 /**
@@ -304,6 +422,8 @@ export interface Settings {
   projectionEndYear: number;
   /** Residual band methodology. */
   bandMode: BandMode;
+  /** Displayed model (v0.2.0); selecting it never triggers a refit. */
+  model: ModelKind;
   /** `auto` uses every source; `manual` honours enabledSources. */
   sourceMode: SourceMode;
   enabledSources: EnabledSources;
@@ -347,6 +467,50 @@ export interface StatusModel {
   durationMs: number;
 }
 
+/**
+ * `/api/status.refraction` — the Refraction model evaluated NOW (spec 5.3). Present
+ * only when the current fit carries a refraction record.
+ */
+/** Last close of the fitted sample, valued by the fit (B1). */
+export interface StatusLastClose {
+  date: string;
+  usd: number;
+  /** True height of that close. */
+  height: number;
+  /** Exact percentile of that close against the fit's own sample. */
+  percentile: number;
+  /** 50th-percentile line at `height`. */
+  fairValue: number;
+}
+
+export interface StatusRefraction {
+  /** Height used for every `*Now` value below. */
+  heightNow: number;
+  /** True when `heightNow` is a live chain tip observed within the last 3 hours. */
+  heightIsLive: boolean;
+  /** Last close of the fitted sample; null when the fit's sample cannot be reproduced. */
+  lastClose: StatusLastClose | null;
+  /** Whole days `dataEnd` lags behind yesterday (UTC); 0 when the fit is current. */
+  staleDays: number;
+  /** Price of the 50th-percentile line at `heightNow`. */
+  fairValueNow: number;
+  /** 0.1th-percentile line (the floor). */
+  floorNow: number;
+  /** 5th-percentile line (the anchor). */
+  anchorNow: number;
+  /** 99.9th-percentile line (the top). */
+  topNow: number;
+  /** (spot - fairValueNow) / fairValueNow * 100; null without a live spot. */
+  deviationPct: number | null;
+  /** Percentile of the live spot (exact against the fit's closes when available); null without a spot. */
+  percentile: number | null;
+  b1: number;
+  c: number;
+  points: number;
+  dataEnd: string;
+  priceSeries: PriceSeriesKind;
+}
+
 export interface ApiStatus {
   version: string;
   gitSha: string;
@@ -361,6 +525,8 @@ export interface ApiStatus {
   refitIntervalHours: number;
   lastDailyAppendAt: string | null;
   sources: SourceStatus[];
+  /** Refraction model now (v0.2.0); absent when there is no refraction fit. */
+  refraction?: StatusRefraction;
 }
 
 export interface ApiModel {
@@ -378,7 +544,19 @@ export interface ApiModel {
   projection: { endYear: number; cautionAfterYear: number };
   falsifiability: Falsifiability;
   milestones: Milestones;
-  history: Array<{ fittedAt: string; a: number; n: number; r2: number; sigma: number; points: number }>;
+  /** The current record's Refraction fit + `priceSeries` (v0.2.0); absent when it has none. */
+  refraction?: RefractionRecord;
+  history: Array<{
+    fittedAt: string;
+    a: number;
+    n: number;
+    r2: number;
+    sigma: number;
+    points: number;
+    /** Refraction anchor slope / decay rate of that fit, when it had one. */
+    refractionB1?: number;
+    refractionC?: number;
+  }>;
 }
 
 export type PricePoint = [string, number, number];

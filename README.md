@@ -13,6 +13,11 @@ README's prose, never as defaults the app falls back to. Every readout tile, cha
 carries a built-in explainer (small (i) buttons and a collapsible "What am I looking at?" chart panel) that
 spells out in plain English what the number means and where it comes from, without leaving the dashboard.
 
+Since v0.2.0 the app also offers a second model, **Refraction** (by Plan C, [@TheRealPlanC](https://x.com/TheRealPlanC)
+on X), which measures time in blocks mined instead of calendar days and draws a percentile fan that bends
+toward a fixed anchor line as the chain grows. A **Model: Power law | Refraction** switch on the chart flips the
+whole page between the two; power-law mode is unchanged from v0.1.8. See [The Refraction model](#the-refraction-model).
+
 ## The model
 
 On every fit, the app takes every stored daily USD closing price (plus, optionally, a live spot price
@@ -138,16 +143,122 @@ entirely in your browser (no server round-trip): UTF-8 with a byte-order mark an
 two decimals, BTC amounts to up to eight), so they drop straight into a spreadsheet; in **My holdings** mode
 it exports your per-year BTC amounts and their values instead of prices.
 
+## The Refraction model
+
+**Independent re-implementation.** The Refraction model was designed by Plan C
+([@TheRealPlanC](https://x.com/TheRealPlanC) on X). This app implements it independently from the
+published description and tables, and refits it from data; it is not affiliated with, endorsed by, or
+reviewed by its author, and any error here is this app's, not his. The explanations below are in this
+README's own words, not his.
+
+**Protocol time instead of calendar time.** The power-law model above measures time in days since genesis.
+Refraction measures it in **block height** `h` - how many blocks the chain has mined by the close in
+question. Blocks arrive on average every ten minutes but not on a fixed schedule, so the same calendar
+span can hold more or fewer blocks; the model treats the chain's own clock as the one that matters. The
+fit is done against `log10(h)`, and every logarithm below is base 10. For dates beyond the data, the height
+is projected forward at 144 blocks per calendar day, a fixed model-definition constant.
+
+**The anchor, the decay, and the percentile lines.** With `P` the daily close in USD:
+
+- The **anchor** is the 5th-percentile line: `log A(h) = b0 + b1 * log h`. It is a straight line in log-log
+  space, a power law in block height, and it never bends. On the chart it is labelled as the anchor; price
+  has closed below it on about 5% of days by construction.
+- The **decay** is `S(h) = 1 - tanh(c * h / 200000) ^ alpha`. It starts near 1 and falls toward 0 as the
+  chain grows. `alpha = 5/4` is part of the model's definition ("set", not fitted); `c` is fitted.
+- A percentile line **above** the anchor (`q > 5`) sits at `log(P_q / A) = z_q * S(h)`. As `S` falls the
+  line is pulled down toward the anchor, so the upper part of the fan narrows over time - the "refraction".
+- A percentile line **below** the anchor (`q < 5`) sits at `log(P_q / A) = d_q`, a fixed distance beneath
+  it (`d_q` is negative), parallel to the anchor.
+- The **50th-percentile line** is what the dashboard calls fair value in this mode.
+
+`z_q` and `d_q` are calibrated for coverage: they are chosen so that a share `q` of all historical closes
+lies below line `q`. "Percentile" here means exactly that and nothing more - "price has closed below this
+line on X% of days" - and the dashboard draws nine lines: 0.1, 1, 5, 15, 25, 50, 75, 95 and 99.9.
+
+**How it is fitted, in plain words.** Nothing about the curve is pinned to published numbers; the whole thing
+is refit from the stored data on every refit, in order:
+
+1. **Inputs.** Completed daily closes only (never today's provisional point), each paired with the true chain
+   height of the last block mined that UTC day.
+2. **Anchor.** An exact 5th-percentile (tau = 0.05) linear quantile regression of `log P` on `log h` - an
+   exact search, not an iterative approximation, which isn't accurate enough here.
+3. **Decay constant `c`.** With the anchor fixed, `c` is the value that best fits the 99.9th-percentile
+   line (minimising the tau = 0.999 pinball loss). The search is a fixed, deterministic grid down to
+   `1e-8`, because that loss is very flat near its minimum while the published tables only reproduce when `c`
+   is right to about seven decimal places.
+4. **Calibration.** The offsets `d_q` and `z_q` are empirical quantiles of the residuals over all closes
+   (Hyndman-Fan type 8 interpolation).
+
+The steps run in this fixed order with no iteration between them, and two runs on the same data give
+bit-identical results. One fit takes roughly 0.3 seconds on a desktop CPU.
+
+**Why refit instead of pinning the author's numbers.** The same reason as the power-law side: no fitted
+coefficient is ever hard-coded here. The parameters move as data accumulates - for example `c` is about
+0.175 when fitted on data to the end of 2022 and about 0.197 on data to November 2026 - so a pinned value would
+quietly go stale, and a refit lets the dashboard show how the model actually changes as the chain grows.
+
+**How closely it tracks the published tables.** Refit from scratch on Coin Metrics daily closes with true
+block heights, the engine reproduces every cell of the author's published tables for the closes of 24 and 25
+November 2026 to within $0.50 (41 of 41 cells). On the 24 November dataset (5,974 closes from 2010-07-18) it
+fits `b0 = -29.4454`, `b1 = 5.7220`, `c = 0.19682`, against his published -29.445 / 5.722 / 0.1968. Those
+published values appear in this repo only in tests and in this prose, never as defaults.
+
+**Which prices the fit uses.** When Coin Metrics daily closes are stored, the fit uses those - the author's
+own series, which is why the app can track his tables so closely. If they are unavailable, the fit falls back
+to the app's own canonical price series (see [Data sources](#data-sources)) joined to heights by date, and the
+dashboard says which series was used. The two series differ slightly, and the difference is not uniform: on 24
+November 2026 the fallback measured 0.3% below his 50th-percentile line, 1.4% above his 0.1th, and 4.7% below
+his 99.9th - so the fallback is fine for the middle of the fan and moves the top line by several percent.
+
+**Switching models.** Use the **Model: Power law | Refraction** pill pair at the start of the chart's control
+row, or the **Model** select in the Settings drawer; both read and write the same server-side `model`
+setting, so the choice follows you across devices. Changing it never triggers a refit - both models are
+fitted on every refit. If there is no Refraction fit yet (for example, too few usable closes or no height
+data), the Refraction pill is disabled, with the reason on hover, and the page stays in power-law mode. In
+Refraction mode the whole page follows the switch:
+
+- **Chart:** the price line is unchanged; filled bands run between the 0.1-15, 15-50, 50-75, 75-95 and
+  95-99.9 lines, coloured cool to hot. The 0.1, 5, 50, 95 and 99.9 lines are on by default and the others
+  sit under "More bands" (1, 15, 25 and 75). The 50% line is drawn as fair value. The tooltip adds block
+  height (marked as estimated when projected), deviation from fair value and percentile; a percentile read
+  from the stored grid is prefixed with "≈". The corner note names the model, the price series (Coin Metrics
+  closes, or the app's own series as a fallback) and the date the fit runs through; when that date is more
+  than 3 days behind yesterday a "fit is N days behind" chip appears beside the Model switch. Pan, zoom, X/Y axis modes, range pills,
+  halvings and the oscillator keep working, with the oscillator measured against the 50% line.
+- **Readouts:** the same nine tiles, redefined for this model - Fair value now, Deviation, Current
+  percentile, Floor now (0.1% line), Anchor exponent `b1`, Decay `c`, Top now (99.9% line), Block height
+  (live chain tip, or estimated at +144 blocks per day), and Next auto-refit. The same numbers are in
+  `/api/status.refraction`, together with `staleDays` and `lastClose` (the last daily close, its exact
+  percentile and the fair value at that close).
+- **Percentile table** (new, directly under the chart, Refraction mode only): the nine lines for today, one
+  year, three years and five years out, headed by the last daily close, its percentile and the fair value
+  at that close. "Today" is evaluated at the current block height; each horizon adds
+  144 blocks per calendar day to the same date that many years later.
+- **Year-end table:** columns Year | Actual close | 0.1% | 5% | 50% | 75% | 95% | 99.9%, each at 31 December,
+  with the same "My holdings" mode. **Export CSV** writes Year, Actual close, Block height, Height estimated
+  and then every ladder line, named `btc-refraction-year-end_<fit date>.csv`; the power-law CSV is unchanged.
+- **Milestones:** fair value on 1 January 2030, 2035, 2040 and 2045, and the date the fair-value line crosses
+  $1M. The power-law falsifiability chips are replaced by two taken from the author's own stated break
+  conditions: "above the 0.1% floor" (spot at or above the floor line) and "no month below the floor" (fewer
+  than 30 consecutive daily closes below it at the end of the series).
+- **Words:** the "What am I looking at?" panel and every (i) popover have a Refraction version.
+
+Per-line visibility choices for this mode are stored separately from the power-law band choices. The
+chart's data past 2040 is still hatched, but in this mode the note says that the author publishes
+five-year projections and anything further out is extrapolation.
+
 ## Data sources
 
 | Source | Kinds | Notes |
 |---|---|---|
-| blockchain.info | history | Primary full history (`charts/market-price?timespan=all&sampled=false`) - `sampled=false` is load-bearing: without it the endpoint silently returns a coarse 4-day-sampled grid instead of true daily data. Refetched and reconciled into the store on every refit |
+| blockchain.info | history, tip height | Primary full history (`charts/market-price?timespan=all&sampled=false`) - `sampled=false` is load-bearing: without it the endpoint silently returns a coarse 4-day-sampled grid instead of true daily data. Refetched and reconciled into the store on every refit. Also supplies a chain-tip height (`getblockcount`) |
 | Bitstamp | history, spot | OHLC history back to 2011-08-18, paginated; ticker for spot |
 | Binance (`data-api.binance.vision`) | history, spot | Klines back to 2017, paginated; ticker for spot |
 | Kraken | history, spot | OHLC (interval=1440, ~720 candles / roughly 2 years); ticker for spot |
 | Coinbase | spot | Spot only |
-| mempool.space | history, spot | Full historical-price series (coarser resolution); spot price |
+| Coin Metrics (community API) | block counts, daily closes | Used only by the Refraction model: daily block counts (turned into cumulative block heights) and `PriceUSD` daily closes, one request covering the whole history. The closes are the series the Refraction fit prefers; the power-law side does not use them |
+| Blockstream | tip height | Chain-tip block height only |
+| mempool.space | history, spot, heights | Full historical-price series (coarser resolution); spot price. For block heights: difficulty-adjustment epochs (an independent height-versus-time cross-check), the tip height, and a block-at-time lookup used only as a diagnostic of the Coin Metrics count offset |
 | CoinGecko | spot | Spot only, last resort - only queried when the other spot sources return fewer than 2 answers |
 
 **Amalgamation strategy:** the canonical store never contains today's date - blockchain.info's own "today"
@@ -170,6 +281,55 @@ kraken / bitstamp / binance / mempool.space respond within a 4-second window (Co
 than two of those answer); publishing a new spot value requires quorum (at least 2 agreeing sources), and
 any single source more than 2.5% off the median of the others is rejected outright. Below quorum, the
 dashboard keeps showing the last known-good spot value, marked `stale`.
+
+**How block heights are kept.** The Refraction model needs the height of the last block of every UTC day, so
+the app keeps a second canonical store, `heights.json`, built the same cautious way as the price store.
+Coin Metrics' daily block counts are summed into a cumulative count and stored as authoritative. That
+cumulative count runs a few blocks ahead of the true chain height (5 blocks when measured, genesis not
+counted), so the stored height is the cumulative count minus a fixed basis offset of 5, the value measured
+when the bundled snapshot was built. The app never rebases history on its own: each refit it still asks
+mempool.space for the last block before 00:00 UTC, but that lookup is only a diagnostic - if the measured
+offset differs from 5 on both of the last two complete days it logs one activity event and nothing else.
+The first full download is the whole history; later refits fetch only the most recent days (the last
+authoritative day minus 7) and splice them onto the stored base, with a full re-download when the store has
+no Coin Metrics days and once every 7 days as an integrity pass. If the combined block-count-and-close request
+fails it retries for block counts alone, and the whole height step is capped at 30 seconds so a slow Coin
+Metrics can never hold up the power-law refit - past the cap that refit simply goes ahead without this run's
+height data. Today's height is never stored: it is the live chain tip, the median (the lower one when an even
+number answer) of whichever of Blockstream, mempool.space and blockchain.info respond with a plausible value,
+where plausible means no lower than the last authoritative height and no higher than that height plus 300
+blocks per elapsed day plus 300. Days after Coin Metrics' last row and before today are filled by
+interpolating in time between the last authoritative day and the tip, flagged `interpolated`, and replaced
+when Coin Metrics catches up; if no plausible tip answers in a run those interpolated days are dropped
+rather than kept stale. If Coin Metrics is unreachable and the store is short, the app seeds it from a
+**bundled snapshot** of daily block counts, so the Refraction model can still be drawn offline. As an
+independent check, mempool.space's difficulty-adjustment epochs are compared with the store: a day off by more
+than 50 blocks is flagged `divergent` and logged, and the stored value wins. Each record in `heights.json` is
+validated when the file is loaded and bad records are dropped. A failure anywhere in this pipeline never
+fails a refit - it logs an event, and at worst the Refraction model is unavailable while the power-law side
+is unaffected.
+
+Height calls keep their own health counters: blockchain.info's and mempool.space's chips and `/api/status`
+rows still reflect price health as before, and their height health appears separately as `heightHealth`
+(for Coin Metrics and Blockstream it is the only health they have).
+
+**Which closes feed the Refraction fit.** The fit uses the Coin Metrics closes only when there are at least
+730 of them and the newest is no more than 3 days older than the latest completed close of the app's own
+price series; otherwise it uses the app's own series joined to the stored heights (interpolated days
+included). `/api/status.refraction.staleDays` reports how many days the fit's last close is behind
+(0 when current), and an activity event is logged when it is more than 3 days behind yesterday.
+
+**Data licence notice.** The Refraction model's block counts and daily closes come from the Coin Metrics
+[Community API](https://docs.coinmetrics.io/api), which the app queries at runtime from your own Umbrel; the
+bundled snapshot in `src/fixtures/heights.ts` is a copy of daily block counts (`BlkCnt`) obtained from that
+data. Coin Metrics states that its Community data, including the
+[public data repository](https://github.com/coinmetrics/data), is made available under the
+[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) licence, "without any warranty". This
+project credits Coin Metrics as the source of that data and is not affiliated with or endorsed by Coin
+Metrics; the MIT licence of this repository covers the code, not that third-party data, which keeps the
+terms it came with. The bundled block-count snapshot is the one piece of Coin Metrics-derived data that
+ships in the repository and in the published image; everything else from Coin Metrics is fetched at runtime
+on your own machine.
 
 ## How updating works
 
@@ -228,8 +388,9 @@ dashboard can flag exactly what didn't take.
 | Spot poll interval (minutes) | `spotPollMinutes` | `BPL_SPOT_POLL_MINUTES` | `5` (range 1-60) |
 | Projection end year | `projectionEndYear` | `BPL_PROJECTION_END_YEAR` | `2045` (range 2030-2055) |
 | Band mode | `bandMode` | `BPL_BAND_MODE` | `pointInTime` (or `fullSample`, `quantileRegression`) |
+| Model | `model` | `BPL_MODEL` | `powerLaw` (or `refraction`) |
 | Source mode | `sourceMode` | `BPL_SOURCE_MODE` | `auto` (or `manual`) |
-| Enabled sources (manual mode only) | `enabledSources.<name>` | - | all `true` |
+| Enabled sources (manual mode only) | `enabledSources.<name>` | - | all `true`, including the two added in v0.2.0, `enabledSources.coinmetrics` and `enabledSources.blockstream` |
 | My holdings mode (year-end table) | `holdings.enabled` | - (dashboard only, see note) | `false` |
 | BTC held - global (year-end table) | `holdings.globalBtc` | - (dashboard only, see note) | `0` |
 | BTC held - per year (year-end table) | `holdings.perYear.<YYYY>` | - (dashboard only, see note) | `{}` (unset) |
@@ -239,6 +400,17 @@ It's personal data - how much BTC you hold or plan to hold - typed directly into
 holdings" mode, not deployment configuration a container should ship with. It lives only in this app's own
 `settings.json` on your Umbrel's `/data` volume, behind Umbrel's login, and is never transmitted anywhere
 else; see [the year-end table's holdings mode above](#the-model) for details.
+
+Fresh installs and auto mode default both new sources to on. An existing `settings.json` in `sourceMode:
+manual` that lacks the two keys gets them switched **off** (you chose your outbound hosts deliberately) and one
+activity event says how to enable them in Settings; until then the Refraction fit falls back to the app's own
+price series and the height data comes from the bundled snapshot plus mempool.space.
+
+`model` chooses which model the dashboard shows; it never triggers a refit, because both models are fitted
+every time. An older `settings.json` without `model` or without the two new source keys loads unchanged, with
+`model` defaulting to `powerLaw` and, outside manual mode, the new sources to `true`. **Band mode** applies to the power-law model
+only. No new "must stay enabled" rule was added for the new sources: if no height source is enabled or
+reachable, the Refraction model is simply unavailable and the power-law side is unaffected.
 
 `BPL_HTTP_PORT` (default `3013`) and `BPL_DATA_DIR` (default `/data`) are process-level env vars, read at
 startup only - they're not part of `settings.json` and aren't editable from the dashboard.
@@ -286,6 +458,25 @@ this app tries to surface these caveats rather than bury them:
   up better than fitted sigmoids over those horizons - but "won some historical out-of-sample horizons" is
   a much weaker claim than "is the correct model of Bitcoin's price," and different lookback windows or
   scoring rules can favor either family.
+- **Refraction: the percentile lines are calibrated in sample.** The offsets `d_q` and `z_q` are chosen so
+  the lines have the stated coverage of the very closes they are fitted to, so "price has closed below this
+  line X% of days" is a description of history, not a measured out-of-sample forecast.
+- **Refraction: the top line and the decay constant rest on very few days.** The 99.9th-percentile line, and
+  with it `c`, depend on about six extreme daily closes out of roughly 6,000. The parameters also drift as
+  data accumulates (`c` was about 0.175 on data to the end of 2022 and about 0.197 on data to November 2026).
+- **Refraction: the fallback price series moves the top line.** Without Coin Metrics closes the fit uses
+  the app's own price series, which on 24 November 2026 landed 0.3% below the author's 50th line, 1.4% above
+  his 0.1th and 4.7% below his 99.9th (measured on a plain date join; the app's own series labels each day one
+  day later than Coin Metrics does, so the live fallback differs slightly from these figures); the dashboard
+  shows which series is in use.
+- **Refraction: heights beyond the data are projected.** Future dates assume 144 blocks per day. The page
+  evaluates "now" at the chain tip seen at the last refit when that is under 3 hours old (so the height is
+  not a continuously polled tip); otherwise it uses the last stored height plus 144 blocks per day and marks
+  the height as estimated. Past the five-year horizon the author publishes, the model is extrapolation.
+- **Refraction: what would count against it.** The author's own stated conditions for worry are roughly a
+  month or more of closes below the 0.1th-percentile line, or a fall far below it. The milestones card shows
+  two chips built on the first condition (spot above the floor, and fewer than 30 consecutive closes
+  below it), but a model that has not yet failed is not a model that has been shown right.
 - **This is not financial advice.** This app computes a curve fit against historical data and shows you
   where the current price sits relative to it. It does not know anything about the future. Deviation
   above or below trend has, historically, mean-reverted over some horizons and not others; past behavior
@@ -314,14 +505,19 @@ real network is never touched, so the whole initial-sync / refit / dashboard / j
 exercised without waiting on live APIs or burning through their rate limits. `MOCK=1` must never be set in
 `docker-compose.yml`.
 
+`MOCK=1` also serves block heights from the bundled snapshot of daily block counts
+(`src/fixtures/heights.ts`), so the Refraction model works fully offline too. There is nothing new to install
+for it - still zero runtime dependencies.
+
 Then open `http://localhost:3013`. Runtime npm dependencies are intentionally zero - the app is built on
 `node:http`, `node:fs`, `node:test`, and the global `fetch`; `typescript` and `@types/node` are dev-only.
 
 ## Release process
 
-1. Bump the version in three places, kept in lockstep: `package.json` (`version`),
-   `hmlebtc-powerlaw-model/umbrel-app.yml` (`version`), and the image tag pinned in
-   `hmlebtc-powerlaw-model/docker-compose.yml`.
+1. Bump the version in four places, kept in lockstep: `package.json` (`version`), both version fields at
+   the top of `package-lock.json`, `hmlebtc-powerlaw-model/umbrel-app.yml` (`version`), and the image tag
+   pinned in `hmlebtc-powerlaw-model/docker-compose.yml`. CI checks the manifest, the image tag and the git tag
+   against each other; it does not check `package.json` or the lockfile.
 2. Add a `releaseNotes` entry to `umbrel-app.yml` for the new version.
 3. Commit, then tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 4. `.github/workflows/docker-publish.yml` builds `linux/amd64` + `linux/arm64`, runs `npm test`, and pushes

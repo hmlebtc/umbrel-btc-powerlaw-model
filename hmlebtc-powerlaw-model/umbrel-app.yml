@@ -6,15 +6,15 @@ manifestVersion: 1
 id: hmlebtc-powerlaw-model
 category: finance
 name: BTC Power Law Model
-version: "0.1.8"
-tagline: Always-current Bitcoin power law model, refit from live data and projected to 2045
+version: "0.2.0"
+tagline: Bitcoin power law and Refraction models, always refit from live data and projected to 2045
 icon: https://raw.githubusercontent.com/hmlebtc/umbrel-btc-powerlaw-model/main/assets/icon-512.png
 # Umbrel renders the description literally - each paragraph is one physical
-# line, blank line between paragraphs. Do not soft-wrap.
+# line, one after another with no blank line between them. Do not soft-wrap.
 description: |
-  Bitcoin's price has tracked a power law against its own age since genesis - price = A * t^n, where t is days since the 2009-01-03 genesis block - closely enough that porkopolis.io/thechart and others use it as a long-run valuation reference. This app runs that same regression itself, continuously, on your own Umbrel: no static coefficients are ever baked into the code, every number on the dashboard is recomputed from data at fit time.
-  The model refits automatically every 12 hours (configurable) and on demand via a dashboard button with a live progress bar, step label, and ETA. Its input is a daily USD price history amalgamated from multiple free, keyless APIs (blockchain.info, Bitstamp, Binance, Kraken, mempool.space) cross-checked against each other, plus a live spot price - the median of several exchanges - folded in as a provisional point for today until the day's real close is available.
-  The chart mirrors porkopolis.io/thechart: an OLS power regression plotted with price and trend on log-log axes, four residual-percentile band pairs - 50% (teal), 67% (blue), 95% (red), and 99% (purple) of history, each toggleable from a legend chip - in either a full-sample or a point-in-time expanding-window mode, halving markers, and a projection out to 2045 with the model author's own stated ~2040 validity horizon called out visually. Readout cards surface fair value, deviation percent, current quantile, the fitted exponent and R², and more, each with a built-in (i) explainer, plus a collapsible "What am I looking at?" panel on the chart itself; a settings drawer, source health chips, and an activity feed round out the dashboard. A high R-squared and a clean-looking chart are not proof of a predictive law - read the README's "Limitations & honest caveats" section before treating any of this as investment advice. Not financial advice.
+  Bitcoin's price has tracked a power law against its own age since genesis - price = A * t^n, where t is days since the 2009-01-03 genesis block - closely enough that porkopolis.io/thechart and others use it as a long-run valuation reference. This app runs that regression itself, continuously, on your own Umbrel, and since 0.2.0 it also offers a second model, Plan C's Refraction model, which measures time in block height instead of calendar days. A switch on the chart flips the whole page between the two. No static coefficients are baked into the code: every number on the dashboard is recomputed from data at fit time.
+  Both models refit automatically every 12 hours (configurable) and on demand via a dashboard button with a live progress bar, step label, and ETA. The power law's input is a daily USD price history amalgamated from multiple free, keyless APIs (blockchain.info, Bitstamp, Binance, Kraken, mempool.space) cross-checked against each other, plus a live spot price - the median of several exchanges - folded in as a provisional point for today until the day's real close is available. The Refraction model additionally needs the block height of each daily close, taken from Coin Metrics (which also supplies the daily closes the author used), cross-checked against mempool.space, with Blockstream, mempool.space and blockchain.info supplying the live chain tip and a bundled snapshot as a last resort.
+  The power law view is an OLS regression plotted with price and trend, thirteen individually toggleable residual-percentile lines in three band modes (full-sample, point-in-time, or quantile regression), halving markers, and a projection out to 2045 with the model author's own stated ~2040 validity horizon called out visually. The Refraction view draws nine percentile lines from 0.1% to 99.9% - a 5% anchor line that never bends, with the upper lines converging toward it as the chain grows - adds a percentile table for today and one, three and five years ahead, and carries its own year-end table, milestones and explainers. Readout cards surface fair value, deviation, current percentile and the fitted parameters, each with a built-in (i) explainer; a settings drawer, source health chips, and an activity feed round out the dashboard. Both models are curve fits calibrated on past data; a clean-looking chart is not proof of a predictive law - read the README's "Limitations & honest caveats" section before treating any of this as investment advice. Not financial advice.
 developer: hmlebtc
 website: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 repo: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
@@ -31,6 +31,48 @@ defaultPassword: ""
 submitter: hmlebtc
 submission: https://github.com/hmlebtc/umbrel-btc-powerlaw-model
 releaseNotes: |
+  v0.2.0 - a second model: Plan C's Refraction model, in block-height time.
+
+  A new Model switch (Power law | Refraction) sits at the start of the chart's control row, and
+  the whole page follows it: chart, readouts, tables, milestones, CSV export and help text. The
+  Refraction model, by Plan C (@TheRealPlanC), measures time in blocks mined rather than calendar
+  days. It draws an anchor line at the 5th percentile of price against block height, and
+  percentile lines above it that bend toward the anchor as the chain grows, so the band narrows
+  over time. This app is an independent re-implementation, not affiliated with or endorsed by its
+  author.
+
+  The model needs the block height of every daily close. The app now reads daily block counts and
+  closing prices from Coin Metrics and a chain-tip height from Blockstream, and also uses
+  mempool.space and blockchain.info for heights; two new source switches, coinmetrics and
+  blockstream, join the others. A snapshot of daily block counts is bundled as a last resort, and
+  the small offset between Coin Metrics' count and the true chain height is fixed at the value
+  measured for that snapshot and checked against mempool.space on every refit. Heights are kept in
+  a new heights.json.
+
+  The Refraction model is refit from live data on every refit; no published coefficient is built
+  in. Refit from scratch on Coin Metrics closes, it reproduces every cell of the author's
+  published tables for the closes of 24 and 25 November 2026 to within 50 cents. If Coin Metrics
+  closes are unavailable it falls back to the app's own price series, which measured on 24
+  November 2026 sits within 5 percent of his lines, so the page says which series the fit used.
+  The percentile lines are calibrated in sample, and the top line rests on about six extreme daily
+  closes.
+
+  A new percentile table, shown in Refraction mode only, lists the 0.1% to 99.9% lines for today
+  and for one, three and five years ahead, and the milestones card reports fair value on 1 January
+  2030, 2035, 2040 and 2045 and when the fair value line crosses 1 million dollars. The power law
+  view is unchanged apart from the switch itself and the two new source chips.
+
+  After updating, the app starts one refit on its own, and the Refraction option becomes available
+  when it finishes, about a minute later. If your install is in manual source mode, the two new
+  sources start switched off until you enable them in Settings; meanwhile the Refraction fit falls
+  back to the app's own price series, and block heights come from the bundled snapshot plus
+  mempool.space. This release also fixes the Linear option of the Y-axis control, which did not
+  draw in 0.1.8.
+
+  No data or settings migration needed: the new setting and files are created automatically, an
+  existing settings.json and model.json load as they are, and existing installs pick this up on
+  their next update. Not financial advice.
+
   v0.1.8 - the 0.01% floor rail joins the year-end model table.
 
   The year-end model table gains one column: 0.01%, sitting first among the model columns in both

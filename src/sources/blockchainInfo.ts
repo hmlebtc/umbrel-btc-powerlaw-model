@@ -10,7 +10,7 @@
  */
 
 import type { DailyObservation } from '../types.js';
-import { fetchJson, unixToUtcDate, type PriceSource } from './types.js';
+import { fetchJson, toBlockCount, unixToUtcDate, type PriceSource } from './types.js';
 
 interface MarketPriceResponse {
   values?: Array<{ x?: number; y?: number }>;
@@ -32,10 +32,16 @@ export function parseMarketPrice(resp: MarketPriceResponse): DailyObservation[] 
   return out;
 }
 
+const TIP_URL = 'https://blockchain.info/q/getblockcount';
+
 export function createBlockchainInfoSource(): PriceSource {
   return {
     name: 'blockchainInfo',
-    kinds: ['history'],
+    kinds: ['history', 'height'],
+    // Plain-text integer body (valid JSON), so fetchJson parses it as a number.
+    async fetchTipHeight(): Promise<number> {
+      return toBlockCount(await fetchJson<unknown>(TIP_URL, { timeoutMs: 4000 }));
+    },
     async fetchDailyHistory(fromDate?: string): Promise<DailyObservation[]> {
       const resp = await fetchJson<MarketPriceResponse>(ALL_URL);
       const rows = parseMarketPrice(resp);

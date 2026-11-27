@@ -4,11 +4,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  takeSettingsNotices,
+  manualModeMissingSources,
   defaultSettings,
   loadSettings,
   seedSettingsFromEnv,
@@ -86,6 +88,8 @@ test('validateSettings: manual mode with too few spot sources reverts enabledSou
       coinbase: false, // only 0 spot sources
       mempoolSpace: false,
       coingecko: false,
+      coinmetrics: true,
+      blockstream: true,
     },
   });
   const { errors, resetFields, settings } = validateSettings(hostile);
@@ -105,6 +109,8 @@ test('validateSettings: manual mode with no history source reverts enabledSource
       coinbase: true,
       mempoolSpace: false,
       coingecko: false,
+      coinmetrics: true,
+      blockstream: true,
     },
   });
   const { errors, resetFields } = validateSettings(hostile);
@@ -123,6 +129,8 @@ test('validateSettings: a valid manual config is accepted', () => {
       coinbase: true,
       mempoolSpace: false,
       coingecko: false,
+      coinmetrics: true,
+      blockstream: true,
     },
   });
   const { errors, resetFields } = validateSettings(good);
@@ -388,6 +396,173 @@ test('loadSettings: a hostile persisted holdings is reverted on load', () => {
       'utf8',
     );
     assert.deepEqual(loadSettings(dir).holdings, defaultSettings().holdings);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.0: the coinmetrics / blockstream block-height sources.
+// ---------------------------------------------------------------------------
+
+test('defaultSettings: coinmetrics and blockstream are on by default', () => {
+  const d = defaultSettings();
+  assert.equal(d.enabledSources.coinmetrics, true);
+  assert.equal(d.enabledSources.blockstream, true);
+});
+
+test('loadSettings: a v0.1.8 settings.json without the two height sources loads them as true, no errors', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const old = defaultSettings() as unknown as Record<string, unknown>;
+    const oldSources: Record<string, boolean> = { ...(old.enabledSources as Record<string, boolean>), mempoolSpace: false };
+    delete oldSources.coinmetrics;
+    delete oldSources.blockstream;
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ ...old, enabledSources: oldSources }), 'utf8');
+    const loaded = loadSettings(dir);
+    assert.equal(loaded.enabledSources.coinmetrics, true);
+    assert.equal(loaded.enabledSources.blockstream, true);
+    assert.equal(loaded.enabledSources.mempoolSpace, false, 'existing choices are preserved');
+    // The merged result passes validation untouched (no reset fields).
+    assert.deepEqual(validateSettings(loaded).resetFields, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validateSettings: manual mode has no new floor — both height sources may be off', () => {
+  const s = withDefaults({
+    sourceMode: 'manual',
+    enabledSources: { ...defaultSettings().enabledSources, coinmetrics: false, blockstream: false },
+  });
+  const { errors, resetFields, settings } = validateSettings(s);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(resetFields, []);
+  assert.equal(settings.enabledSources.coinmetrics, false);
+  assert.equal(settings.enabledSources.blockstream, false);
+});
+
+test('SettingsStore.update: a partial PUT toggles one height source and coerces booleans', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const store = new SettingsStore(dir, defaultSettings());
+    const r = store.update({ enabledSources: { coinmetrics: false } as never });
+    assert.equal(r.ok, true);
+    assert.equal(store.get().enabledSources.coinmetrics, false);
+    assert.equal(store.get().enabledSources.blockstream, true);
+    assert.equal(store.get().enabledSources.blockchainInfo, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.0: the `model` setting (powerLaw | refraction), validated like bandMode.
+// ---------------------------------------------------------------------------
+
+test("model: defaults to 'powerLaw'; an old settings.json without it loads as 'powerLaw'", () => {
+  assert.equal(defaultSettings().model, 'powerLaw');
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    const old: Record<string, unknown> = { ...defaultSettings() };
+    delete old.model;
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(old), 'utf8');
+    assert.equal(loadSettings(dir).model, 'powerLaw');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('model: BPL_MODEL seeds the first boot; a bad seed falls back to the default', () => {
+  assert.equal(seedSettingsFromEnv({ BPL_MODEL: 'refraction' } as NodeJS.ProcessEnv).model, 'refraction');
+  assert.equal(seedSettingsFromEnv({ BPL_MODEL: 'nope' } as NodeJS.ProcessEnv).model, 'powerLaw');
+  assert.equal(seedSettingsFromEnv({} as NodeJS.ProcessEnv).model, 'powerLaw');
+});
+
+test('model: validateSettings reports and reverts a bad value; a good one passes', () => {
+  const bad = validateSettings(withDefaults({ model: 'eqm' as never }));
+  assert.ok(bad.errors.some((e) => e.includes('model')));
+  assert.deepEqual(bad.resetFields, ['model']);
+  assert.equal(bad.settings.model, 'powerLaw');
+  assert.deepEqual(validateSettings(withDefaults({ model: 'refraction' })).errors, []);
+});
+
+test('model: a hostile persisted value is reverted on load; PUT rejects it without applying', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ ...defaultSettings(), model: 7 }), 'utf8');
+    assert.equal(loadSettings(dir).model, 'powerLaw');
+    const store = new SettingsStore(dir, defaultSettings());
+    const bad = store.update({ model: 'x' as never });
+    assert.equal(bad.ok, false);
+    assert.equal(store.get().model, 'powerLaw');
+    assert.equal(store.update({ model: 'refraction' }).ok, true);
+    assert.equal(store.get().model, 'refraction');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1, R11: manual mode keeps the new hosts OFF.
+// ---------------------------------------------------------------------------
+
+function writeOld(dir: string, sourceMode: string, enabledSources: Record<string, boolean>): void {
+  const old: Record<string, unknown> = { ...defaultSettings(), sourceMode, enabledSources };
+  delete old.model;
+  writeFileSync(join(dir, 'settings.json'), JSON.stringify(old), 'utf8');
+}
+const OLD_SOURCES = (() => {
+  const e: Record<string, boolean> = { ...defaultSettings().enabledSources };
+  delete e.coinmetrics;
+  delete e.blockstream;
+  return e;
+})();
+
+test('R11: an existing manual-mode settings.json without the new keys loads them OFF, persists that, and raises one notice', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    takeSettingsNotices();
+    writeOld(dir, 'manual', OLD_SOURCES);
+    assert.deepEqual(manualModeMissingSources(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'))), ['coinmetrics', 'blockstream']);
+    const s = loadSettings(dir);
+    assert.equal(s.enabledSources.coinmetrics, false);
+    assert.equal(s.enabledSources.blockstream, false);
+    assert.equal(s.enabledSources.blockchainInfo, true);
+    const notices = takeSettingsNotices();
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!, /coinmetrics and blockstream.*OFF.*Settings/);
+    // Persisted: the next boot finds the keys and stays quiet.
+    const again = loadSettings(dir);
+    assert.equal(again.enabledSources.coinmetrics, false);
+    assert.deepEqual(takeSettingsNotices(), []);
+    // The user can switch them on afterwards and that sticks.
+    const store = new SettingsStore(dir, again);
+    assert.equal(store.update({ enabledSources: { coinmetrics: true } as never }).ok, true);
+    assert.equal(loadSettings(dir).enabledSources.coinmetrics, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('R11: auto mode, fresh installs and manual files that already have the keys keep their values', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+  try {
+    takeSettingsNotices();
+    writeOld(dir, 'auto', OLD_SOURCES);
+    assert.equal(loadSettings(dir).enabledSources.coinmetrics, true);
+    writeOld(dir, 'manual', { ...OLD_SOURCES, coinmetrics: true });
+    const partial = loadSettings(dir);
+    assert.equal(partial.enabledSources.coinmetrics, true); // present: honoured
+    assert.equal(partial.enabledSources.blockstream, false); // absent: off
+    assert.equal(takeSettingsNotices().length, 1);
+    const fresh = mkdtempSync(join(tmpdir(), 'bpl-settings-'));
+    try {
+      assert.equal(loadSettings(fresh, {} as NodeJS.ProcessEnv).enabledSources.coinmetrics, true);
+      assert.deepEqual(takeSettingsNotices(), []);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

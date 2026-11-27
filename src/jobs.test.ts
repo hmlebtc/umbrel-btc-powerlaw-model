@@ -10,9 +10,12 @@ import { join } from 'node:path';
 
 import { EventLog } from './events.js';
 import { HISTORY_FIXTURE } from './fixtures/history.js';
-import { JobRunner, JobStats, ModelStore } from './jobs.js';
+import { HEIGHTS_SNAPSHOT_END, heightsFromSnapshot } from './fixtures/heights.js';
+import { HeightStore } from './heightStore.js';
+import { HEIGHT_FETCH_CAP_MS, JobRunner, JobStats, ModelStore, startupJobKind } from './jobs.js';
 import { PriceStore } from './priceStore.js';
 import { defaultSettings } from './settings.js';
+import type { FitRecord, Settings } from './types.js';
 import { createMockSources, SourceRegistry, type PriceSource } from './sources/types.js';
 import { SpotAggregator } from './spot.js';
 
@@ -247,4 +250,301 @@ test('JobStats: migrates an old single-value jobstats.json into the refit EMA (F
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.0 block heights: fetched in parallel with the price history, reconciled
+// inside the existing steps, and never able to fail the refit.
+// ---------------------------------------------------------------------------
+
+function buildWithHeights(sources?: PriceSource[], settingsFn: () => Settings = defaultSettings) {
+  const registry = new SourceRegistry(sources ?? createMockSources());
+  const priceStore = new PriceStore();
+  const heightStore = new HeightStore();
+  const getSettings = settingsFn;
+  const spot = new SpotAggregator(registry, getSettings);
+  const modelStore = new ModelStore();
+  const jobStats = new JobStats();
+  const events = new EventLog();
+  const runner = new JobRunner({ registry, priceStore, heightStore, spot, getSettings, modelStore, jobStats, events });
+  return { runner, heightStore, events, modelStore };
+}
+
+test('JobRunner (MOCK): a refit ends with a populated height store, a tip, and today never stored', async () => {
+  const { runner, heightStore, modelStore } = buildWithHeights();
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.ok(modelStore.current());
+
+  const series = heightStore.series();
+  const snap = heightsFromSnapshot();
+  assert.equal(series[0]!.date, '2009-01-03');
+  assert.ok(series.length >= snap.length);
+  // Authoritative days equal the snapshot; the last stored day is yesterday.
+  assert.equal(heightStore.get(HEIGHTS_SNAPSHOT_END)!.src, 'coinmetrics');
+  assert.equal(heightStore.latestDate(), daysAgoUtc(1));
+  assert.equal(heightStore.has(todayUtc()), false);
+  const tip = heightStore.tip();
+  assert.ok(tip && tip.height >= series[series.length - 1]!.h);
+  const api = heightStore.toApi()!;
+  assert.equal(api.count, api.heights.length);
+  // The job steps themselves are unchanged (5 steps).
+  assert.equal(runner.last()!.stepCount, 5);
+});
+
+test('JobRunner: with every height source failing the refit still succeeds (seeded from the snapshot, no tip)', async () => {
+  const boom = async (): Promise<never> => {
+    throw new Error('height source down');
+  };
+  const sources = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.fetchTipHeight) o.fetchTipHeight = boom;
+    if (s.fetchEpochs) o.fetchEpochs = boom;
+    if (s.fetchBlockCounts) o.fetchBlockCounts = boom;
+    return o;
+  });
+  const { runner, heightStore, modelStore } = buildWithHeights(sources);
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.ok(modelStore.current());
+  assert.equal(heightStore.get('2020-05-11')!.src, 'seed');
+  assert.equal(heightStore.tip(), null);
+  assert.equal(heightStore.latestDate(), HEIGHTS_SNAPSHOT_END);
+});
+
+test('JobRunner: a throwing height reconcile is logged and never fails the refit', async () => {
+  const { runner, heightStore, events, modelStore } = buildWithHeights();
+  heightStore.setMaxCommitDate = () => {
+    throw new Error('store exploded');
+  };
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.ok(modelStore.current());
+  assert.ok(events.list().some((e) => /heights: reconcile failed/.test(e.msg)));
+});
+
+test('JobRunner: coinmetrics disabled (manual mode) -> the primary is skipped and the seed is used', async () => {
+  const manual = (): Settings => {
+    const s = defaultSettings();
+    s.sourceMode = 'manual';
+    s.enabledSources.coinmetrics = false;
+    return s;
+  };
+  const { runner, heightStore } = buildWithHeights(undefined, manual);
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.equal(heightStore.get('2020-05-11')!.src, 'seed');
+  assert.ok(heightStore.tip(), 'tip sources are still enabled');
+});
+
+test('JobRunner: without a height store the refit behaves as before (no height calls at all)', async () => {
+  let calls = 0;
+  const sources = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.fetchTipHeight) o.fetchTipHeight = async () => { calls++; return 1; };
+    if (s.fetchBlockCounts) o.fetchBlockCounts = async () => { calls++; return []; };
+    return o;
+  });
+  const { runner } = build(sources);
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done');
+  assert.equal(calls, 0);
+});
+
+test('JobRunner (MOCK): the refit stores Coin Metrics closes on the true-height basis and calibrates offset 5', async () => {
+  const { runner, heightStore } = buildWithHeights();
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.equal(heightStore.offset(), 5);
+  assert.equal(heightStore.get(HEIGHTS_SNAPSHOT_END)!.h, 977_595);
+  const sample = heightStore.completedCloses();
+  assert.equal(sample.length, heightStore.closeCount());
+  assert.ok(sample.length > 5000);
+  assert.ok(sample.every((p) => p.usd > 0 && p.date < todayUtc()));
+});
+
+test('JobRunner: a failing calibration lookup never fails the refit; the default offset is used', async () => {
+  const sources = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.fetchLastBlockHeightBefore) o.fetchLastBlockHeightBefore = async () => { throw new Error('lookup down'); };
+    return o;
+  });
+  const { runner, heightStore } = buildWithHeights(sources);
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.equal(heightStore.offset(), 5);
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.0 Refraction fit inside the refit job (spec 5.2)
+// ---------------------------------------------------------------------------
+
+test('JobRunner (MOCK): the record carries a refraction fit on the Coin Metrics closes', async () => {
+  const { runner, modelStore, events } = buildWithHeights();
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  const rec = modelStore.current()!;
+  const r = rec.refraction!;
+  assert.ok(r, 'refraction block missing');
+  assert.equal(r.priceSeries, 'coinmetrics');
+  assert.ok(r.points > 5000);
+  assert.ok(Math.abs(r.b1 - 5.75) < 0.05, `b1 ${r.b1}`);
+  assert.ok(Math.abs(r.c - 0.2087) < 0.005, `c ${r.c}`);
+  assert.equal(r.gridPcts.length, r.gridOffsets.length);
+  assert.ok(r.fitMs >= 0);
+  // The power-law side is the usual record, and the activity event names the fit.
+  assert.ok(rec.points >= 5800 && rec.n > 5);
+  assert.ok(events.list().some((e) => /refraction b1=\d\.\d{4}, c=0\.\d{4} \(coinmetrics/.test(e.msg)));
+  // R3: the mock prices end 2026-07-10, far behind yesterday: one event says so.
+  assert.equal(events.list().filter((e) => /refraction fit ends 2026-07-10, \d+ days behind yesterday/.test(e.msg)).length, 1);
+  assert.equal(r.sampleChecksum!.n, r.points);
+  assert.equal(runner.last()!.stepCount, 5);
+});
+
+test('JobRunner: without Coin Metrics closes the refraction fit falls back to the canonical series', async () => {
+  const { runner, modelStore, heightStore } = buildWithHeights();
+  heightStore.completedCloses = () => [];
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  const r = modelStore.current()!.refraction!;
+  assert.equal(r.priceSeries, 'canonical');
+  assert.ok(r.points > 5000);
+});
+
+test('JobRunner: too little height data -> no refraction block, one event, power-law record intact', async () => {
+  const { runner, modelStore, heightStore, events } = buildWithHeights();
+  heightStore.completedCloses = () => [];
+  heightStore.series = () => [];
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.equal(modelStore.current()!.refraction, undefined);
+  assert.equal(events.list().filter((e) => /refraction skipped/.test(e.msg)).length, 1);
+});
+
+test('JobRunner: an engine failure is logged and the power-law record is still written as before', async () => {
+  const { runner, modelStore, heightStore, events } = buildWithHeights();
+  // 800 rows pass the sample-size gate but every h is 0, so the engine rejects them all.
+  // (dated up to yesterday so the Coin Metrics series counts as fresh and is the one chosen)
+  heightStore.completedCloses = () => Array.from({ length: 800 }, (_, i) => ({ date: daysAgoUtc(800 - i), usd: 100, h: 0 }));
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  const rec = modelStore.current()!;
+  assert.equal(rec.refraction, undefined);
+  assert.ok(rec.points >= 5800 && Number.isFinite(rec.n));
+  assert.equal(events.list().filter((e) => /refraction fit failed/.test(e.msg)).length, 1);
+  assert.ok(events.list().some((e) => /complete/.test(e.msg) && !/refraction b1/.test(e.msg)));
+});
+
+test('JobRunner: without a height store the record has no refraction block and no refraction event (v0.1.8)', async () => {
+  const { runner, modelStore } = build();
+  await runToCompletion(runner);
+  const rec = modelStore.current()!;
+  assert.equal('refraction' in rec, false);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 (R1, R2, R4, R5)
+// ---------------------------------------------------------------------------
+
+/** Run one more refit to completion (runToCompletion returns early when a previous job is already `last`). */
+async function runAgain(runner: JobRunner): Promise<void> {
+  const r = runner.start('refit');
+  assert.equal(r.ok, true);
+  await waitFor(() => !runner.isRunning());
+}
+
+test('R1: a blockchain.info history failure reaches "fail" even though its tip call succeeds on every refit', async () => {
+  const sources = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.name === 'blockchainInfo') {
+      const first = s.fetchDailyHistory!;
+      let n = 0;
+      o.fetchDailyHistory = async (from?: string) => {
+        if (n++ === 0) return first(from); // the first refit builds the model
+        throw new Error('HTTP 503');
+      };
+    }
+    return o;
+  });
+  const { runner, heightStore } = buildWithHeights(sources);
+  const registry = (runner as unknown as { deps: { registry: SourceRegistry } }).deps.registry;
+  await runToCompletion(runner);
+  for (let i = 0; i < 3; i++) await runAgain(runner);
+  const row = registry.statusRows(defaultSettings()).find((r) => r.name === 'blockchainInfo')!;
+  assert.ok(row.consecutiveFailures >= 3, `consecutiveFailures ${row.consecutiveFailures}`);
+  assert.ok(row.heightHealth && row.heightHealth.consecutiveFailures === 0 && row.heightHealth.lastOkAt);
+  assert.ok(heightStore.tip(), 'height pipeline kept working');
+});
+
+test('R2 (job): a hostile tip source cannot poison the store, and honest runs keep working', async () => {
+  const hostile = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.name === 'blockstream') o.fetchTipHeight = async () => 2_000_000_000;
+    return o;
+  });
+  const { runner, heightStore } = buildWithHeights(hostile);
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done');
+  // Two honest tips (mempool, blockchain.info) + one hostile: the median is honest.
+  assert.ok(heightStore.tip()!.height < 1_000_000);
+  assert.ok(heightStore.series().every((p) => p.h < 1_000_000));
+});
+
+test('R4 (job): the first refit loads the full history, later ones fetch incrementally from last day - 7', async () => {
+  const asked: Array<string | undefined> = [];
+  const sources = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.fetchBlockCounts) {
+      const inner = s.fetchBlockCounts;
+      o.fetchBlockCounts = async (opts) => {
+        asked.push(opts?.startDate);
+        return inner(opts);
+      };
+    }
+    return o;
+  });
+  const { runner, heightStore } = buildWithHeights(sources);
+  await runToCompletion(runner);
+  await runAgain(runner);
+  assert.deepEqual(asked, [undefined, '2026-11-18']);
+  // The spliced store equals what a clean full load gives.
+  const clean = buildWithHeights();
+  await runToCompletion(clean.runner);
+  assert.deepEqual(heightStore.series().filter((p) => !heightStore.get(p.date)!.flags), clean.heightStore.series().filter((p) => !clean.heightStore.get(p.date)!.flags));
+});
+
+test('R4 (job): a hanging height fetch cannot hold up the refit past the cap; the refit proceeds without heights and says so', async () => {
+  const sources = createMockSources().map((s) => {
+    const o: PriceSource = { ...s };
+    if (s.fetchBlockCounts) o.fetchBlockCounts = () => new Promise<never>(() => undefined); // never settles
+    return o;
+  });
+  const registry = new SourceRegistry(sources);
+  const priceStore = new PriceStore();
+  const heightStore = new HeightStore();
+  const events = new EventLog();
+  const spot = new SpotAggregator(registry, defaultSettings as () => Settings);
+  const modelStore = new ModelStore();
+  const runner = new JobRunner({
+    registry, priceStore, heightStore, spot, getSettings: defaultSettings, modelStore, jobStats: new JobStats(), events, heightFetchCapMs: 150,
+  });
+  const started = Date.now();
+  await runToCompletion(runner);
+  assert.equal(runner.last()!.state, 'done', runner.last()!.error ?? '');
+  assert.ok(Date.now() - started < 10_000);
+  assert.equal(heightStore.count(), 0, 'late/absent height data is not applied');
+  assert.ok(modelStore.current() && !modelStore.current()!.refraction);
+  assert.ok(events.list().some((e) => /exceeded 0 s|exceeded \d+ s/.test(e.msg)));
+  assert.equal(HEIGHT_FETCH_CAP_MS, 30_000);
+});
+
+test('R5: startupJobKind — initial sync, the upgrade refit, or nothing', () => {
+  const rec = (withRefraction: boolean) =>
+    ({ fittedAt: 'x', refraction: withRefraction ? ({} as never) : undefined }) as unknown as FitRecord;
+  assert.equal(startupJobKind(0, rec(true), 10), 'initial-sync'); // no prices
+  assert.equal(startupJobKind(5000, null, 10), 'initial-sync'); // no model
+  assert.equal(startupJobKind(5000, rec(false), 0), 'refit'); // upgrade: model without Refraction, no heights
+  assert.equal(startupJobKind(5000, rec(false), 6000), null); // heights exist: ordinary schedule
+  assert.equal(startupJobKind(5000, rec(true), 0), null); // already has Refraction
+  assert.equal(startupJobKind(5000, rec(true), 6000), null);
 });

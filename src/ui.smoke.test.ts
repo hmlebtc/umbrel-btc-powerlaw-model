@@ -990,3 +990,13 @@ test("the year-end table's floor rail follows the active band mode", () => {
     "holdings scaling did not reach the floor-rail column",
   );
 });
+
+// v0.2.0: the two block-height sources appear in the settings checkboxes and the
+// client's source list (the chips are rendered from /api/status, so they follow).
+test("settings form has a checkbox for each block-height source and the client knows them", () => {
+  for (const name of ["coinmetrics", "blockstream"]) {
+    assert.ok(DASHBOARD_HTML.includes('id="cfg_src_' + name + '"'), name + " checkbox missing");
+    assert.ok(APP_JS.includes('"' + name + '"'), name + " missing from the client SOURCES list");
+  }
+  assert.ok(/SOURCES = \[[^\]]*"coinmetrics", "blockstream"\]/.test(APP_JS), "SOURCES list must end with the two new sources");
+});

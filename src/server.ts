@@ -11,6 +11,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { DASHBOARD_HTML } from './ui/dashboard.js';
 import { FAVICON_SVG } from './ui/favicon.js';
 import type { EventLog } from './events.js';
+import type { HeightStore } from './heightStore.js';
 import type { JobRunner, ModelStore } from './jobs.js';
 import {
   currentQuantile,
@@ -22,11 +23,12 @@ import {
   trendUsdAt,
 } from './model.js';
 import type { PriceStore } from './priceStore.js';
+import { buildRefractionStatus } from './refractionView.js';
 import type { Scheduler } from './scheduler.js';
 import type { SettingsStore } from './settings.js';
 import type { SourceRegistry } from './sources/types.js';
 import type { SpotAggregator } from './spot.js';
-import type { ApiModel, ApiPrices, ApiStatus, PricePoint, Settings, StatusModel } from './types.js';
+import type { ApiModel, ApiPrices, ApiStatus, PricePoint, Settings, StatusModel, StatusRefraction } from './types.js';
 
 const BODY_LIMIT = 64 * 1024;
 const DEFAULT_MAX_POINTS = 8000;
@@ -34,6 +36,8 @@ const DEFAULT_MAX_POINTS = 8000;
 export interface AppContext {
   settings: SettingsStore;
   priceStore: PriceStore;
+  /** Per-day block heights (v0.2.0); a later phase reads `series()` and `tip()` from here. */
+  heightStore: HeightStore;
   modelStore: ModelStore;
   spot: SpotAggregator;
   jobRunner: JobRunner;
@@ -169,6 +173,23 @@ function buildStatus(ctx: AppContext): ApiStatus {
     }
   }
 
+  // Refraction "now" (v0.2.0): evaluated at the live tip (else projected) with the live
+  // spot; omitted entirely when the current fit carries no refraction record.
+  let refraction: StatusRefraction | null = null;
+  if (model?.refraction) {
+    try {
+      refraction = buildRefractionStatus(
+        model.refraction,
+        ctx.heightStore,
+        () => ctx.priceStore.series(),
+        spot && spot.usd > 0 ? spot.usd : null,
+        Date.now(),
+      );
+    } catch {
+      refraction = null; // never let the new block break the existing payload
+    }
+  }
+
   return {
     version: ctx.version,
     gitSha: ctx.gitSha,
@@ -183,6 +204,7 @@ function buildStatus(ctx: AppContext): ApiStatus {
     refitIntervalHours: settings.refitIntervalHours,
     lastDailyAppendAt: ctx.scheduler ? ctx.scheduler.lastDailyAppendAt() : null,
     sources: ctx.registry.statusRows(settings),
+    ...(refraction ? { refraction } : {}),
   };
 }
 
@@ -215,6 +237,7 @@ function buildModel(ctx: AppContext): ApiModel | null {
     projection: { endYear: settings.projectionEndYear, cautionAfterYear: 2040 },
     falsifiability: falsifiability(model, tToday, spotUsd),
     milestones: milestones(model.a, model.n),
+    ...(model.refraction ? { refraction: model.refraction } : {}),
     history: ctx.modelStore.history().map((h) => ({
       fittedAt: h.fittedAt,
       a: h.a,
@@ -222,6 +245,7 @@ function buildModel(ctx: AppContext): ApiModel | null {
       r2: h.r2,
       sigma: h.sigma,
       points: h.points,
+      ...(h.refraction ? { refractionB1: h.refraction.b1, refractionC: h.refraction.c } : {}),
     })),
   };
 }
@@ -263,10 +287,18 @@ async function handleSettingsPut(ctx: AppContext, req: IncomingMessage, res: Ser
   const parsed = parseJson(body.text);
   if (!parsed.ok) return fail(res, 400, 'invalid JSON body');
 
+  const before = JSON.parse(JSON.stringify(ctx.settings.get())) as Settings;
   const result = ctx.settings.update(parsed.value as Partial<Settings>);
   if (!result.ok) return fail(res, 400, 'invalid settings', { errors: result.errors });
   ctx.scheduler?.reschedule();
-  ctx.events.add('settings', 'settings updated via API');
+  // Switching the displayed model is a view choice, not a configuration change: when
+  // it is the ONLY effective change, keep the activity list quiet. Everything else
+  // (including a PUT that changes nothing) logs exactly as in v0.1.8.
+  const after = ctx.settings.get();
+  const { model: modelBefore, ...restBefore } = before;
+  const { model: modelAfter, ...restAfter } = after;
+  const onlyModel = modelBefore !== modelAfter && JSON.stringify(restBefore) === JSON.stringify(restAfter);
+  if (!onlyModel) ctx.events.add('settings', 'settings updated via API');
   return ok(res, ctx.settings.get());
 }
 
@@ -293,6 +325,11 @@ async function route(ctx: AppContext, req: IncomingMessage, res: ServerResponse)
   }
   if (method === 'GET' && path === '/api/prices') {
     return ok(res, buildPrices(ctx, Number(url.searchParams.get('maxPoints'))));
+  }
+  if (method === 'GET' && path === '/api/heights') {
+    const h = ctx.heightStore.toApi();
+    if (!h) return fail(res, 404, 'heights not available yet');
+    return ok(res, h);
   }
   if (method === 'GET' && path === '/api/events') {
     const n = Number(url.searchParams.get('limit'));
